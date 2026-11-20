@@ -1,0 +1,314 @@
+"""Build a plan using only the source's read interface."""
+
+from collections import Counter, defaultdict, deque
+from collections.abc import Iterator
+from dataclasses import asdict, dataclass
+
+from .client import Document, ReadClient, ReadError
+from .registry import PRIMARY_TYPES, REGISTRY
+from .settings import Selection
+
+Key = tuple[str, str]
+
+
+@dataclass(frozen=True)
+class Entity:
+    kind: str
+    id: str
+    fqn: str
+
+    @property
+    def key(self) -> Key:
+        return self.kind, self.id
+
+
+@dataclass(frozen=True)
+class Reference:
+    entity: Entity
+    relationship: str
+    target_kind: str
+    target: str
+    reason: str
+
+
+@dataclass(frozen=True, order=True)
+class Relationship:
+    source_kind: str
+    source_id: str
+    field: str
+    target_kind: str
+    target_id: str
+
+
+def _text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ReadError(f"The source returned an invalid {label}.")
+    return value
+
+
+def _read_entity(
+    kind: str, payload: Document, expected_id: str | None = None
+) -> Entity:
+    entity_id = _text(payload.get("id"), f"{kind} ID")
+    if expected_id is not None and expected_id != entity_id:
+        raise ReadError(f"The {kind} detail did not match the requested ID.")
+    fqn = payload.get("fullyQualifiedName")
+    if fqn is None and kind in {"team", "user"}:
+        fqn = payload.get("name")
+    return Entity(kind, entity_id, _text(fqn, f"{kind} FQN"))
+
+
+def _items(value: object, label: str) -> list[Document]:
+    if value is None:
+        return []
+    if not isinstance(value, list) or any(not isinstance(row, dict) for row in value):
+        raise ReadError(f"The source returned an invalid {label} relationship list.")
+    return value
+
+
+def _reference(raw: object, field: str) -> Key:
+    if not isinstance(raw, dict):
+        raise ReadError(f"The source returned an invalid {field} reference.")
+    return _text(raw.get("type"), f"{field} type"), _text(raw.get("id"), f"{field} ID")
+
+
+def _details(
+    client: ReadClient, kind: str, selection: Selection
+) -> Iterator[tuple[Entity, Document]]:
+    for entity_id in client.list_ids(kind, selection.batch_size):
+        payload = client.detail(kind, entity_id)
+        if payload is None:
+            raise ReadError(
+                f"A listed {kind} disappeared before its detail could be read."
+            )
+        yield _read_entity(kind, payload, entity_id), payload
+
+
+def _domains(
+    client: ReadClient, selection: Selection
+) -> dict[Key, tuple[Entity, Document]]:
+    domains = {
+        entity.key: (entity, payload)
+        for entity, payload in _details(client, "domain", selection)
+    }
+    by_name = {entity.fqn: key for key, (entity, _) in domains.items()}
+    if len(by_name) != len(domains):
+        raise ReadError("The domain listing contains duplicate FQNs.")
+    roots = [by_name.get(fqn) for fqn in selection.domains]
+    if None in roots:
+        raise ReadError("A configured domain FQN was not found in the source.")
+
+    children: dict[Key, list[Key]] = defaultdict(list)
+    parents: dict[Key, Key] = {}
+    for key, (_, payload) in domains.items():
+        if payload.get("parent") is not None:
+            parent = _reference(payload["parent"], "domain parent")
+            if parent[0] != "domain":
+                raise ReadError("A domain has an unsupported parent relationship.")
+            children[parent].append(key)
+            parents[key] = parent
+
+    for key in domains:
+        visited: set[Key] = set()
+        while key in parents:
+            if key in visited:
+                raise ReadError("The domain hierarchy contains a cycle.")
+            visited.add(key)
+            key = parents[key]
+
+    selected: dict[Key, tuple[Entity, Document]] = {}
+    pending = deque(root for root in roots if root is not None)
+    while pending:
+        key = pending.popleft()
+        if key in selected:
+            continue
+        selected[key] = domains[key]
+        if selection.include_subdomains:
+            pending.extend(children[key])
+    return selected
+
+
+def _assignments(payload: Document, field: str) -> set[Key]:
+    assignments: set[Key] = set()
+    for raw in _items(payload.get(field), field):
+        key = _reference(raw, field)
+        inherited = raw.get("inherited")
+        if key[0] != "domain" or (
+            inherited is not None and type(inherited) is not bool
+        ):
+            raise ReadError("The source returned an unsupported domain assignment.")
+        if inherited is not True:
+            assignments.add(key)
+    return assignments
+
+
+def _dependencies(
+    entity: Entity,
+    payload: Document,
+) -> Iterator[tuple[str, str, str, bool, bool]]:
+    for rule in REGISTRY[entity.kind].dependencies:
+        raw = payload.get(rule.field)
+        if rule.required and raw is None:
+            raise ReadError(
+                f"The source omitted the required {entity.kind}.{rule.field} reference."
+            )
+        values = raw if isinstance(raw, list) else ([] if raw is None else [raw])
+        if rule.required and len(values) != 1:
+            raise ReadError(
+                f"The source returned an invalid {entity.kind}.{rule.field} reference."
+            )
+        for item in values:
+            kind, value = _reference(item, rule.field)
+            if rule.field == "owners" and item.get("inherited") is True:
+                continue
+            if rule.required and kind not in rule.kinds:
+                raise ReadError(
+                    f"The source returned an unsupported {entity.kind}.{rule.field} type."
+                )
+            yield rule.field, kind, value, False, kind in rule.kinds
+    if "tags" in REGISTRY[entity.kind].fields:
+        for label in _items(payload.get("tags"), "tags"):
+            fqn = _text(label.get("tagFQN"), "tag FQN")
+            source = label.get("source")
+            if source == "Classification":
+                yield "tags", "tag", fqn, True, True
+            elif source == "Glossary":
+                yield "tags", "glossaryTerm", fqn, True, True
+            else:
+                yield "tags", "unknown", fqn, True, False
+
+
+def build_plan(client: ReadClient, selection: Selection, version: str) -> Document:
+    domains = _domains(client, selection)
+    primaries: dict[Key, tuple[Entity, Document]] = {}
+    references: set[Reference] = set()
+    relationships: set[Relationship] = set()
+    for kind in PRIMARY_TYPES:
+        field = REGISTRY[kind].domain_field
+        assert field is not None
+        for entity, payload in _details(client, kind, selection):
+            assigned = _assignments(payload, field)
+            selected = assigned.intersection(domains)
+            if selected:
+                primaries[entity.key] = entity, payload
+                for domain_kind, domain_id in selected:
+                    relationships.add(
+                        Relationship(
+                            entity.kind, entity.id, field, domain_kind, domain_id
+                        )
+                    )
+                for other_kind, other_id in assigned.difference(domains):
+                    references.add(
+                        Reference(
+                            entity, field, other_kind, other_id, "external_reference"
+                        )
+                    )
+
+    for entity, _ in primaries.values():
+        if entity.kind != "dataProduct":
+            continue
+        for member in client.product_members(entity.id, selection.batch_size):
+            kind, entity_id = _reference(member, "assets")
+            if (kind, entity_id) in primaries:
+                relationships.add(
+                    Relationship(entity.kind, entity.id, "assets", kind, entity_id)
+                )
+            else:
+                references.add(
+                    Reference(entity, "assets", kind, entity_id, "external_reference")
+                )
+
+    nodes = {**domains, **primaries}
+    roles = dict.fromkeys(domains, "selected_domain") | dict.fromkeys(
+        primaries, "primary"
+    )
+    pending = deque(nodes.values())
+    resolved: dict[tuple[str, str, bool], Entity | None] = {}
+    while pending:
+        entity, payload = pending.popleft()
+        for field, kind, value, by_name, supported in _dependencies(entity, payload):
+            if not supported:
+                references.add(
+                    Reference(entity, field, kind, value, "unsupported_reference")
+                )
+                continue
+            if not by_name and (kind, value) in nodes:
+                relationships.add(
+                    Relationship(entity.kind, entity.id, field, kind, value)
+                )
+                continue
+            if not selection.include_dependencies:
+                references.add(
+                    Reference(entity, field, kind, value, "excluded_dependency")
+                )
+                continue
+            lookup = kind, value, by_name
+            if lookup not in resolved:
+                details = client.detail(kind, value, by_name=by_name)
+                dependency = (
+                    _read_entity(kind, details, None if by_name else value)
+                    if details is not None
+                    else None
+                )
+                if dependency is not None and details is not None:
+                    if by_name and dependency.fqn != value:
+                        raise ReadError(
+                            "A dependency detail did not match the requested FQN."
+                        )
+                    if dependency.key not in nodes:
+                        nodes[dependency.key] = dependency, details
+                        roles[dependency.key] = "required_dependency"
+                        pending.append((dependency, details))
+                resolved[lookup] = dependency
+            dependency = resolved[lookup]
+            if dependency is None:
+                references.add(
+                    Reference(entity, field, kind, value, "missing_reference")
+                )
+            else:
+                relationships.add(
+                    Relationship(entity.kind, entity.id, field, kind, dependency.id)
+                )
+
+    entries = [
+        {**asdict(entity), "role": roles[key]}
+        for key, (entity, _) in sorted(
+            nodes.items(),
+            key=lambda entry: (entry[1][0].kind, entry[1][0].fqn, entry[1][0].id),
+        )
+    ]
+    return {
+        "schema_version": 1,
+        "openmetadata_version": version,
+        "selection": asdict(selection),
+        "coverage": list(PRIMARY_TYPES),
+        "counts": {
+            role: dict(
+                sorted(
+                    Counter(
+                        entry["kind"] for entry in entries if entry["role"] == role
+                    ).items()
+                )
+            )
+            for role in ("selected_domain", "primary", "required_dependency")
+        },
+        "entities": entries,
+        "relationships": [
+            asdict(relationship) for relationship in sorted(relationships)
+        ],
+        "references": [
+            asdict(ref)
+            for ref in sorted(
+                references,
+                key=lambda ref: (
+                    ref.entity.kind,
+                    ref.entity.fqn,
+                    ref.entity.id,
+                    ref.relationship,
+                    ref.target_kind,
+                    ref.target,
+                    ref.reason,
+                ),
+            )
+        ],
+    }

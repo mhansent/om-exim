@@ -3,7 +3,7 @@
 Read `PROJECT_PLAN.md` before making changes. The user's intent is selective OpenMetadata **same-exact-version 2.x** migration. Scope = directly domain-assigned primary entities + descendant subdomains + explicitly necessary dependencies. Avoid graph explosion.
 
 ## Engineering requirements
-- Start by inspecting actual installed SDK/API models. The exact OM 2.x patch and SDK version are not yet provided; do not invent them or assert compatibility. Request versions or make an explicitly mocked, version-agnostic scaffold first.
+- Start by inspecting actual installed SDK/API models. The development baseline is OpenMetadata Server 2.0.0 with SDK 2.0.0.0 and Python 3.12. Verify compatibility with the deployment target, Server 2.0.8, before enabling it. See `CAPABILITIES.md` for evidence and outstanding checks.
 - Use Python with type hints, small testable modules, pytest, ruff, and no hard-coded secrets.
 - For domain assignment, use entity-specific verified relationships, not a universal assumed `entity.domain` shape.
 - Implement read-only plan/export before import. Do not issue writes in preflight, plan, export, validate, or import dry-run.
@@ -15,14 +15,8 @@ Read `PROJECT_PLAN.md` before making changes. The user's intent is selective Ope
 - Do not commit credentials, `.env`, generated export data, or raw production metadata.
 - Add unit tests for every scope and safety invariant in `PROJECT_PLAN.md`.
 
-## First Codex task
-1. Review this file and `PROJECT_PLAN.md`.
-2. Inspect existing repository files and the exact pinned OpenMetadata version if provided.
-3. Create a concise implementation plan and capability matrix; identify unverified assumptions.
-4. Scaffold packaging, CLI, config example, and read-only planning interfaces.
-5. Add synthetic fixtures/tests for domain descendants, direct asset inclusion, typed dependencies, no cross-domain asset leakage, and dry-run zero writes.
-6. Run tests, commit on a feature branch, and prepare a PR. Do not push/merge unless the environment supports it and the user authorizes the action.
-
-## Definition of done for first PR
-- Installable package, documented CLI skeleton, safe config/env handling, automated tests passing, no live server required.
-- Clear TODOs for API-model verification, with no fake working migration claims.
+## Development workflow
+- Use the existing checkout and the setup and test commands in `README.md`.
+- Track supported entities and unverified assumptions in `CAPABILITIES.md`.
+- Use synthetic fixtures for unit tests and disposable same-version instances for integration tests.
+- Run lint and tests before committing changes on a feature branch. Prepare PRs for review and push or merge only with user authorization.
