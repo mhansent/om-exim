@@ -1,6 +1,6 @@
 # OpenMetadata capability matrix
 
-The development baseline is OpenMetadata Server **2.0.0** with Python **3.12** and the **2.0.0.0** release of `openmetadata-ingestion`. The deployment target is Server **2.0.8**. Live API compatibility for either patch still needs verification. The CLI currently accepts only the 2.0.0 baseline and requires the source and target version strings to match exactly.
+The development baseline is OpenMetadata Server **2.0.0** and the **2.0.0.0** release of `openmetadata-ingestion`, with Python **3.12** for SDK model inspection. The REST CLI supports Python **3.12 through 3.14**. The deployment target is Server **2.0.8**. Live API compatibility for either patch still needs verification. The CLI currently accepts only the 2.0.0 baseline and requires the source and target version strings to match exactly.
 
 The matrix inventories the types named in the current project plan and nearby SDK types relevant to scope. The plan mentions a legacy list of 19 categories without enumerating it, so the inventory cannot be reconciled against that list yet. Routes and create request names below were checked in the generated SDK; the P1 REST projections and selection rules were also checked against the tagged server source and exercised with synthetic responses. Every create route remains outside P1.
 
