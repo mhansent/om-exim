@@ -4,14 +4,14 @@ Plan selective OpenMetadata migrations between two instances running the same ex
 
 ## Install
 
-Use Python 3.12.
+The REST CLI supports Python 3.12, 3.13, and 3.14. Use an installed interpreter from that range to create the virtual environment.
 
 ```sh
-python3.12 -m venv .venv
+python3.14 -m venv .venv
 .venv/bin/python -m pip install -e '.[dev]'
 ```
 
-Install `.[dev,sdk]` to inspect the optional OpenMetadata SDK models locally. See the [capability matrix](CAPABILITIES.md) for the verified baseline and coverage.
+Use Python 3.12 with `.[dev,sdk]` to inspect the pinned OpenMetadata SDK models locally. That SDK pins Pydantic below 2.12, and its required `pydantic-core` releases have no Python 3.14 wheels. The REST CLI runs with the dependencies installed above. See the [capability matrix](CAPABILITIES.md) for the verified baseline and coverage.
 
 ## Configure and run
 

@@ -7,7 +7,7 @@ name = "om-exim"
 version = "0.1.0"
 description = "Read-only selective OpenMetadata migration planning"
 readme = "README.md"
-requires-python = ">=3.12,<3.13"
+requires-python = ">=3.12,<3.15"
 dependencies = [
     "python-dotenv>=1.2,<2",
     "PyYAML>=6.0,<7",
