@@ -24,7 +24,7 @@ The process environment takes precedence over `.env`. Either can override the YA
 .venv/bin/om-exim plan
 ```
 
-Both commands check the exact source and target versions first. The current baseline is server `2.0.0`. The plan is JSON on standard output. It reports selected domains, primary entities, required dependencies, their known relationships, and external, missing, unsupported, or excluded references. Membership in a selected data product does not add an asset to the plan. OpenMetadata permissions can limit the entities visible to the source token.
+Both commands require the source and target servers to report the same exact stable OpenMetadata `2.0.x` version. For example, two `2.0.8` servers pass the version check. The plan is JSON on standard output. It reports selected domains, primary entities, required dependencies, their known relationships, and external, missing, unsupported, or excluded references. Membership in a selected data product does not add an asset to the plan. OpenMetadata permissions can limit the entities visible to the source token.
 
 `export`, `import`, and `validate` are reserved for later phases and exit before issuing requests. The example's `migration.output_dir` and `import.on_conflict` document settings for those phases.
 

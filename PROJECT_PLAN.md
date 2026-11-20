@@ -23,7 +23,7 @@ The previous `omd_migrate` experiment did not filter by configured domain despit
 - Automatically overwriting destination entities.
 
 ## Functional requirements
-1. Source/target connections via separate environment variables; redact credentials from logs and manifests. Preflight verify source and target exact server version and SDK compatibility. Fail closed if version cannot be verified or mismatches.
+1. Source/target connections via separate environment variables; redact credentials from logs and manifests. Preflight verifies that source and target report the same exact stable OpenMetadata 2.0.x version. Check SDK and REST compatibility against the development baseline and deployment target. Fail closed if version cannot be verified or mismatches.
 2. `plan`: resolve exact FQNs, descendants, primary entities, typed dependencies, unsupported references; produce counts and reviewable manifest. A missing configured domain is fatal.
 3. `export`: use pagination; honor API's include-deleted and field expansion semantics; retrieve full entity representations where list responses omit relationships. Serialize deterministic UTF-8 NDJSON, include `manifest.json` with schema version, OM version, timestamps, selection rules, per-type counts, hashes, warnings, and unresolved refs. Atomic output writes.
 4. `import`: preflight package hashes and server version; build source-ID/FQN-to-target-ID mapping; use schema-valid create/update requests rather than blindly POSTing exported GET entities; topological dependency order and two-pass relationship linking. Never assume source UUID persists. Handle existing entities with explicit `skip|update|fail` policy, default `fail` for conflicts; apply only with explicit `--apply`.

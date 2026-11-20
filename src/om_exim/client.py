@@ -1,5 +1,6 @@
 """OpenMetadata read-only REST transport and version preflight."""
 
+import re
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import quote
@@ -9,7 +10,6 @@ import requests
 from .registry import REGISTRY
 from .settings import Connection
 
-BASELINE_SERVER = "2.0.0"
 BASELINE_SDK = "2.0.0.0"
 
 Document = dict[str, Any]
@@ -141,8 +141,8 @@ def preflight(source: ReadClient, target: ReadClient) -> str:
     source_version, target_version = source.version(), target.version()
     if source_version != target_version:
         raise ReadError("Source and target must report the same exact server version.")
-    if source_version != BASELINE_SERVER:
+    if re.fullmatch(r"2\.0\.(?:0|[1-9][0-9]*)", source_version) is None:
         raise ReadError(
-            f"Preflight supports only the OpenMetadata {BASELINE_SERVER} baseline."
+            "Preflight requires a stable OpenMetadata 2.0.x server version."
         )
     return source_version
