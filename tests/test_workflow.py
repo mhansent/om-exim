@@ -289,10 +289,15 @@ def test_plan_falls_back_when_table_list_omits_projected_fields(config, api, cap
     ) in api[3]
 
 
-def test_plan_batches_large_table_and_dependency_collections(config, api, capsys):
+@pytest.mark.parametrize(
+    "batch_size, schema_pages, database_pages", [(100, 21, 4), (1000, 3, 1)]
+)
+def test_plan_batches_large_table_and_dependency_collections(
+    config, api, capsys, batch_size, schema_pages, database_pages
+):
     _, routes, _, calls = api
     config.write_text(
-        config.read_text().replace("batch_size: 1", "batch_size: 100")
+        config.read_text().replace("batch_size: 1", f"batch_size: {batch_size}")
         + "\nplan:\n  show_progress: true\n"
     )
     service = ref("databaseService", "service")
@@ -327,8 +332,18 @@ def test_plan_batches_large_table_and_dependency_collections(config, api, capsys
     counts = json.loads(captured.out)["counts"]
     assert "Checking source and target OpenMetadata versions." in captured.err
     assert "Scanning domains..." in captured.err
-    assert "Scanning tables: 100 processed." in captured.err
-    assert "Scanning tables: 10,000 processed in total." in captured.err
+    assert [
+        line
+        for line in captured.err.splitlines()
+        if line.startswith("om-exim: Scanning tables")
+    ] == [
+        "om-exim: Scanning tables...",
+        *(
+            f"om-exim: Scanning tables: {count:,} processed."
+            for count in range(batch_size, 10_001, batch_size)
+        ),
+        "om-exim: Scanning tables: 10,000 processed in total.",
+    ]
     assert "Reading databaseSchemas in bulk..." in captured.err
     assert "Resolving dependencies and references..." in captured.err
     assert captured.err.endswith("om-exim: Plan complete.\n")
@@ -337,9 +352,9 @@ def test_plan_batches_large_table_and_dependency_collections(config, api, capsys
     assert counts["required_dependency"]["databaseSchema"] == 2040
     assert counts["required_dependency"]["database"] == 344
     paths = [path for _, _, path, _ in calls]
-    assert paths.count("tables") == 100
-    assert paths.count("databaseSchemas") == 21
-    assert paths.count("databases") == 4
+    assert paths.count("tables") == 10_000 // batch_size
+    assert paths.count("databaseSchemas") == schema_pages
+    assert paths.count("databases") == database_pages
     assert [path for path in paths if path.startswith("databaseSchemas/")] == [
         "databaseSchemas/schema-0"
     ]

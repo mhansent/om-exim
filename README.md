@@ -30,7 +30,7 @@ Both commands require the source and target servers to report the same exact sta
 
 For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` controls the page size and defaults to 100. Higher values reduce requests and increase the size of each response.
 
-Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
+Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. Running counts are reported in increments of `migration.batch_size`. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
 
 ## Development checks
 
