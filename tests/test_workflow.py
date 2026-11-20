@@ -29,6 +29,9 @@ def api():
         "domains": {
             "a": entity("a", "A"),
             "child": entity("child", "A.child", parent=ref("domain", "a")),
+            "grandchild": entity(
+                "grandchild", "A.child.grandchild", parent=ref("domain", "child")
+            ),
             "b": entity("b", "B"),
             "b-child": entity("b-child", "B.child", parent=ref("domain", "b")),
         },
@@ -37,7 +40,7 @@ def api():
                 "selected",
                 "service.db.schema.selected",
                 **parent_refs,
-                domains=[ref("domain", "child"), ref("domain", "b")],
+                domains=[ref("domain", "grandchild"), ref("domain", "b")],
                 owners=[
                     ref("team", "team"),
                     ref("policy", "wrong-type"),
@@ -155,6 +158,16 @@ def api():
                 return
             base = next((p for p in routes if route.startswith(p + "/")), None)
             payload = routes[base].get(route.removeprefix(base + "/")) if base else None
+            if (
+                base == "domains"
+                and payload
+                and "parent" not in params.get("fields", [""])[0].split(",")
+            ):
+                payload = {
+                    field: value
+                    for field, value in payload.items()
+                    if field != "parent"
+                }
             self.send(200 if payload else 404, payload or {"message": "REDACT_ME"})
 
         def send(self, status, payload):
@@ -221,7 +234,7 @@ def test_plan_does_not_expand_through_product_members_or_inherited_domains(
         for role in ("selected_domain", "primary", "required_dependency")
     }
     assert by_role == {
-        "selected_domain": {"a", "child"},
+        "selected_domain": {"a", "child", "grandchild"},
         "primary": {"selected", "product"},
         "required_dependency": {
             "schema",
@@ -234,13 +247,19 @@ def test_plan_does_not_expand_through_product_members_or_inherited_domains(
             "glossary",
         },
     }
+    assert result["counts"]["selected_domain"] == {"domain": 3}
     assert result["counts"]["primary"] == {"dataProduct": 1, "table": 1}
+    assert {
+        (edge["source_id"], edge["target_id"])
+        for edge in result["relationships"]
+        if edge["source_kind"] == "domain" and edge["field"] == "parent"
+    } == {("child", "a"), ("grandchild", "child")}
     assert {
         (edge["source_id"], edge["field"], edge["target_id"])
         for edge in result["relationships"]
         if edge["source_id"] == "selected"
     } == {
-        ("selected", "domains", "child"),
+        ("selected", "domains", "grandchild"),
         ("selected", "databaseSchema", "schema"),
         ("selected", "database", "db"),
         ("selected", "service", "service"),

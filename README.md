@@ -28,6 +28,8 @@ Both commands require the source and target servers to report the same exact sta
 
 `export`, `import`, and `validate` are reserved for later phases and exit before issuing requests. The example's `migration.output_dir` and `import.on_conflict` document settings for those phases.
 
+The planner includes all descendants of the configured domain FQNs by default. They appear alongside the configured roots as `selected_domain` entries in `entities`, with totals under `counts.selected_domain`. The planner also includes supported required dependencies by default. They appear as `required_dependency` entries, with totals under `counts.required_dependency`. Use `migration.include_subdomains` and `migration.include_dependencies` to control these options.
+
 For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` controls the page size and defaults to 100. Higher values reduce requests and increase the size of each response.
 
 Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. Running counts are reported in increments of `migration.batch_size`. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
