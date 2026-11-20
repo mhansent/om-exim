@@ -34,6 +34,7 @@ class Settings:
     source: Connection
     target: Connection
     selection: Selection | None
+    show_progress: bool = False
 
 
 def _mapping(value: object, location: str, keys: set[str]) -> dict:
@@ -135,10 +136,17 @@ def load_settings(
             "Unable to read the selected YAML configuration or .env."
         ) from None
     values.update(os.environ if environ is None else environ)
-    config = _mapping(raw, "Configuration", {"source", "target", "migration", "import"})
+    config = _mapping(
+        raw, "Configuration", {"source", "target", "migration", "plan", "import"}
+    )
+    plan = _mapping(config.get("plan", {}), "plan", {"show_progress"})
+    show_progress = plan.get("show_progress", False)
+    if type(show_progress) is not bool:
+        raise ConfigError("plan.show_progress must be a boolean.")
     selection = _selection(config.get("migration")) if require_selection else None
     return Settings(
         _connection("source", config.get("source", {}), values),
         _connection("target", config.get("target", {}), values),
         selection,
+        show_progress,
     )

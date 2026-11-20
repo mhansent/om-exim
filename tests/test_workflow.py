@@ -209,7 +209,9 @@ def test_plan_does_not_expand_through_product_members_or_inherited_domains(
     _, _, versions, calls = api
     versions["source"] = versions["target"] = {"version": server_version}
     assert main(["plan"]) == 0
-    stdout = capsys.readouterr().out
+    captured = capsys.readouterr()
+    assert not captured.err
+    stdout = captured.out
     result = json.loads(stdout)
     assert result["openmetadata_version"] == server_version
     assert "REDACT_ME" not in stdout
@@ -289,7 +291,10 @@ def test_plan_falls_back_when_table_list_omits_projected_fields(config, api, cap
 
 def test_plan_batches_large_table_and_dependency_collections(config, api, capsys):
     _, routes, _, calls = api
-    config.write_text(config.read_text().replace("batch_size: 1", "batch_size: 100"))
+    config.write_text(
+        config.read_text().replace("batch_size: 1", "batch_size: 100")
+        + "\nplan:\n  show_progress: true\n"
+    )
     service = ref("databaseService", "service")
     routes["databases"] = {
         f"db-{i}": entity(f"db-{i}", f"service.db{i}", service=service)
@@ -318,7 +323,16 @@ def test_plan_batches_large_table_and_dependency_collections(config, api, capsys
         for i in range(10_000)
     }
     assert main(["plan"]) == 0
-    counts = json.loads(capsys.readouterr().out)["counts"]
+    captured = capsys.readouterr()
+    counts = json.loads(captured.out)["counts"]
+    assert "Checking source and target OpenMetadata versions." in captured.err
+    assert "Scanning domains..." in captured.err
+    assert "Scanning tables: 100 processed." in captured.err
+    assert "Scanning tables: 10,000 processed in total." in captured.err
+    assert "Reading databaseSchemas in bulk..." in captured.err
+    assert "Resolving dependencies and references..." in captured.err
+    assert captured.err.endswith("om-exim: Plan complete.\n")
+    assert "-token" not in captured.err
     assert counts["primary"]["table"] == 9500
     assert counts["required_dependency"]["databaseSchema"] == 2040
     assert counts["required_dependency"]["database"] == 344
@@ -331,6 +345,13 @@ def test_plan_batches_large_table_and_dependency_collections(config, api, capsys
     ]
     assert not any(path.startswith(("tables/", "databases/")) for path in paths)
     assert len(calls) < 150
+
+
+def test_invalid_progress_setting_fails_before_any_network_request(config, api, capsys):
+    config.write_text(config.read_text() + '\nplan:\n  show_progress: "true"\n')
+    assert main(["plan"]) == 1
+    assert "plan.show_progress must be a boolean." in capsys.readouterr().err
+    assert not api[3]
 
 
 @pytest.mark.parametrize(

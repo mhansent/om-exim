@@ -12,6 +12,10 @@ from .plan import build_plan
 from .settings import ConfigError, load_settings
 
 
+def _print_progress(message: str) -> None:
+    print(f"om-exim: {message}", file=sys.stderr, flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="om-exim")
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
@@ -35,9 +39,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         settings = load_settings(args.config, require_selection=args.command == "plan")
+        progress = (
+            _print_progress if settings.selection and settings.show_progress else None
+        )
         with requests.Session() as source_session, requests.Session() as target_session:
             source = ReadClient(settings.source, "Source", source_session)
             target = ReadClient(settings.target, "Target", target_session)
+            if progress:
+                progress("Checking source and target OpenMetadata versions.")
             version = preflight(source, target)
             if settings.selection is None:
                 result = {
@@ -45,11 +54,15 @@ def main(argv: list[str] | None = None) -> int:
                     "sdk_schema_baseline": BASELINE_SDK,
                 }
             else:
-                result = build_plan(source, settings.selection, version)
+                result = build_plan(
+                    source, settings.selection, version, progress=progress
+                )
     except (ConfigError, ReadError) as error:
         print(f"om-exim: {error}", file=sys.stderr)
         return 1
     print(json.dumps(result, indent=2, ensure_ascii=False))
+    if progress:
+        progress("Plan complete.")
     return 0
 
 
