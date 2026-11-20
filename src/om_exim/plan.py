@@ -3,7 +3,6 @@
 from collections import Counter, defaultdict, deque
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from time import monotonic
 
 from .client import Document, ReadClient, ReadError
 from .registry import PRIMARY_TYPES, REGISTRY
@@ -15,20 +14,18 @@ MIN_BULK_DEPENDENCIES = 32
 Progress = Callable[[str], None]
 
 
-def _track[T](rows: Iterator[T], label: str, progress: Progress | None) -> Iterator[T]:
+def _track[T](
+    rows: Iterator[T], label: str, progress: Progress | None, *, batch_size: int
+) -> Iterator[T]:
     if progress is None:
         yield from rows
         return
     progress(f"{label}...")
     count = 0
-    last_update = monotonic()
-    for row in rows:
+    for count, row in enumerate(rows, start=1):
         yield row
-        count += 1
-        now = monotonic()
-        if count % 100 == 0 or now - last_update >= 5:
+        if count % batch_size == 0:
             progress(f"{label}: {count:,} processed.")
-            last_update = now
     progress(f"{label}: {count:,} processed in total.")
 
 
@@ -135,7 +132,10 @@ def _domains(
     domains = {
         entity.key: (entity, payload)
         for entity, payload in _track(
-            _details(client, "domain", selection), "Scanning domains", progress
+            _details(client, "domain", selection),
+            "Scanning domains",
+            progress,
+            batch_size=selection.batch_size,
         )
     }
     by_name = {entity.fqn: key for key, (entity, _) in domains.items()}
@@ -254,7 +254,9 @@ def _structural_details(
         rows = client.list_entities(
             kind, limit, optional=True, max_pages=len(remaining) // 2
         )
-        for row in _track(rows, f"Reading {REGISTRY[kind].route} in bulk", progress):
+        for row in _track(
+            rows, f"Reading {REGISTRY[kind].route} in bulk", progress, batch_size=limit
+        ):
             entity_id = row["id"]
             if entity_id in remaining and _has_projection(row, required):
                 found[kind, entity_id] = _planning_fields(kind, row) | {
@@ -285,7 +287,10 @@ def build_plan(
         assert field is not None
         rows = _details(client, kind, selection)
         for entity, payload in _track(
-            rows, f"Scanning {REGISTRY[kind].route}", progress
+            rows,
+            f"Scanning {REGISTRY[kind].route}",
+            progress,
+            batch_size=selection.batch_size,
         ):
             assigned = _assignments(payload, field)
             selected = assigned.intersection(domains)
@@ -312,7 +317,12 @@ def build_plan(
         if entity.kind != "dataProduct":
             continue
         members = client.product_members(entity.id, selection.batch_size)
-        for member in _track(members, "Reading data product members", progress):
+        for member in _track(
+            members,
+            "Reading data product members",
+            progress,
+            batch_size=selection.batch_size,
+        ):
             kind, entity_id = _reference(member, "assets")
             if (kind, entity_id) in primaries:
                 relationships.add(
@@ -340,7 +350,10 @@ def build_plan(
             yield pending.popleft()
 
     for entity, payload in _track(
-        queued_entities(), "Resolving dependencies and references", progress
+        queued_entities(),
+        "Resolving dependencies and references",
+        progress,
+        batch_size=selection.batch_size,
     ):
         for field, kind, value, by_name, supported in _dependencies(entity, payload):
             if not supported:
