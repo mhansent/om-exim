@@ -1,8 +1,9 @@
 """Build a plan using only the source's read interface."""
 
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
+from time import monotonic
 
 from .client import Document, ReadClient, ReadError
 from .registry import PRIMARY_TYPES, REGISTRY
@@ -11,6 +12,24 @@ from .settings import Selection
 Key = tuple[str, str]
 STRUCTURAL_TYPES = ("databaseSchema", "database")
 MIN_BULK_DEPENDENCIES = 32
+Progress = Callable[[str], None]
+
+
+def _track[T](rows: Iterator[T], label: str, progress: Progress | None) -> Iterator[T]:
+    if progress is None:
+        yield from rows
+        return
+    progress(f"{label}...")
+    count = 0
+    last_update = monotonic()
+    for row in rows:
+        yield row
+        count += 1
+        now = monotonic()
+        if count % 100 == 0 or now - last_update >= 5:
+            progress(f"{label}: {count:,} processed.")
+            last_update = now
+    progress(f"{label}: {count:,} processed in total.")
 
 
 @dataclass(frozen=True)
@@ -111,11 +130,13 @@ def _planning_fields(kind: str, row: Document) -> Document:
 
 
 def _domains(
-    client: ReadClient, selection: Selection
+    client: ReadClient, selection: Selection, progress: Progress | None
 ) -> dict[Key, tuple[Entity, Document]]:
     domains = {
         entity.key: (entity, payload)
-        for entity, payload in _details(client, "domain", selection)
+        for entity, payload in _track(
+            _details(client, "domain", selection), "Scanning domains", progress
+        )
     }
     by_name = {entity.fqn: key for key, (entity, _) in domains.items()}
     if len(by_name) != len(domains):
@@ -205,7 +226,10 @@ def _dependencies(
 
 
 def _structural_details(
-    client: ReadClient, primaries: dict[Key, tuple[Entity, Document]], limit: int
+    client: ReadClient,
+    primaries: dict[Key, tuple[Entity, Document]],
+    limit: int,
+    progress: Progress | None,
 ) -> dict[Key, Document]:
     wanted: dict[str, set[str]] = {kind: set() for kind in STRUCTURAL_TYPES}
     for entity, payload in primaries.values():
@@ -227,9 +251,10 @@ def _structural_details(
             rule.field for rule in REGISTRY[kind].dependencies if rule.required
         )
         # Leave room for targeted fallback when the wanted IDs are sparse in the collection.
-        for row in client.list_entities(
+        rows = client.list_entities(
             kind, limit, optional=True, max_pages=len(remaining) // 2
-        ):
+        )
+        for row in _track(rows, f"Reading {REGISTRY[kind].route} in bulk", progress):
             entity_id = row["id"]
             if entity_id in remaining and _has_projection(row, required):
                 found[kind, entity_id] = _planning_fields(kind, row) | {
@@ -242,15 +267,26 @@ def _structural_details(
     return found
 
 
-def build_plan(client: ReadClient, selection: Selection, version: str) -> Document:
-    domains = _domains(client, selection)
+def build_plan(
+    client: ReadClient,
+    selection: Selection,
+    version: str,
+    *,
+    progress: Progress | None = None,
+) -> Document:
+    domains = _domains(client, selection, progress)
+    if progress:
+        progress(f"Selected {len(domains):,} domains.")
     primaries: dict[Key, tuple[Entity, Document]] = {}
     references: set[Reference] = set()
     relationships: set[Relationship] = set()
     for kind in PRIMARY_TYPES:
         field = REGISTRY[kind].domain_field
         assert field is not None
-        for entity, payload in _details(client, kind, selection):
+        rows = _details(client, kind, selection)
+        for entity, payload in _track(
+            rows, f"Scanning {REGISTRY[kind].route}", progress
+        ):
             assigned = _assignments(payload, field)
             selected = assigned.intersection(domains)
             if selected:
@@ -268,10 +304,15 @@ def build_plan(client: ReadClient, selection: Selection, version: str) -> Docume
                         )
                     )
 
+    if progress:
+        progress(
+            f"Selected {len(primaries):,} primary entities. Checking data product memberships."
+        )
     for entity, _ in primaries.values():
         if entity.kind != "dataProduct":
             continue
-        for member in client.product_members(entity.id, selection.batch_size):
+        members = client.product_members(entity.id, selection.batch_size)
+        for member in _track(members, "Reading data product members", progress):
             kind, entity_id = _reference(member, "assets")
             if (kind, entity_id) in primaries:
                 relationships.add(
@@ -289,12 +330,18 @@ def build_plan(client: ReadClient, selection: Selection, version: str) -> Docume
     pending = deque(nodes.values())
     resolved: dict[tuple[str, str, bool], Entity | None] = {}
     structural = (
-        _structural_details(client, primaries, selection.batch_size)
+        _structural_details(client, primaries, selection.batch_size, progress)
         if selection.include_dependencies
         else {}
     )
-    while pending:
-        entity, payload = pending.popleft()
+
+    def queued_entities() -> Iterator[tuple[Entity, Document]]:
+        while pending:
+            yield pending.popleft()
+
+    for entity, payload in _track(
+        queued_entities(), "Resolving dependencies and references", progress
+    ):
         for field, kind, value, by_name, supported in _dependencies(entity, payload):
             if not supported:
                 references.add(
@@ -340,7 +387,8 @@ def build_plan(client: ReadClient, selection: Selection, version: str) -> Docume
                 relationships.add(
                     Relationship(entity.kind, entity.id, field, kind, dependency.id)
                 )
-
+    if progress:
+        progress(f"Building the JSON report for {len(nodes):,} entities.")
     entries = [
         {**asdict(entity), "role": roles[key]}
         for key, (entity, _) in sorted(
