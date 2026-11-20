@@ -72,19 +72,36 @@ om-exim/
     test_id_mapping.py
 ```
 
-## Suggested CLI contract (refine after API verification)
+## Configuration and suggested CLI contract
+
+By default, load `config.yaml` from the current working directory. Use the optional `--config PATH` to select a different YAML file. Load the optional `.env` from the same directory as the selected YAML file.
+
+Resolve configurable values in this order, from lowest to highest precedence: YAML, supported environment overrides, then explicitly supplied CLI overrides. For environment values, use the current process environment over `.env`. Only the connection fields below can be overridden through the environment. Define the CLI override flags after the YAML schema is complete.
+
+| YAML field | Environment override |
+| --- | --- |
+| `source.server_url` | `OM_SOURCE_SERVER_URL` |
+| `source.token_env` | `OM_SOURCE_TOKEN_ENV` |
+| `target.server_url` | `OM_TARGET_SERVER_URL` |
+| `target.token_env` | `OM_TARGET_TOKEN_ENV` |
+
+A `token_env` value names the variable that holds the token. Resolve that name after applying the overrides, then read the token from the process environment or `.env`. The example YAML uses `OM_SOURCE_TOKEN` and `OM_TARGET_TOKEN` as the default names. Store token values in those variables or their configured replacements. Keep token values out of YAML, CLI arguments, logs, and version control. Fail before making an API request when a connection required by the command has a missing or empty URL or token.
+
+The following examples use the default configuration path. `--package` selects an input package, and `--apply` explicitly authorizes target writes.
+
 ```
-om-exim preflight --config config.yaml
-om-exim plan --config config.yaml --domain Enterprise.Finance --include-subdomains --include-dependencies
-om-exim export --config config.yaml --domain Enterprise.Finance --output ./out/finance
-om-exim import --config config.yaml --package ./out/finance --dry-run
-om-exim import --config config.yaml --package ./out/finance --apply --on-conflict fail
-om-exim validate --config config.yaml --package ./out/finance
+om-exim preflight
+om-exim plan
+om-exim export
+om-exim import --package ./out/finance
+om-exim import --package ./out/finance --apply
+om-exim validate --package ./out/finance
 ```
-No `--apply` should mean no mutations.
+
+Import runs in dry-run mode unless `--apply` is supplied. The exact server version match and the explicit apply requirement are enforced regardless of configuration.
 
 ## Implementation phases
-**P0 — Verify:** inspect pinned OM version, SDK generated model fields, actual REST routes and create request models, relationship fields and pagination; write capability matrix for each of 19 requested types. Obtain exact version from operator (currently unknown). Avoid inventing support.
+**P0 — Verify:** inspect pinned OM version, SDK generated model fields, actual REST routes and create request models, relationship fields and pagination; write capability matrix for each of 19 requested types. Use Server 2.0.0 and SDK 2.0.0.0 as the development baseline. See the [capability matrix](CAPABILITIES.md) for coverage and outstanding live checks.
 
 **P1 — Scaffold and plan:** CLI, config, preflight, entity registry, domain/subdomain resolver, direct-relationship selection, typed dependency plan, fixtures/tests. Produce read-only plan report. No target mutations.
 
@@ -106,7 +123,7 @@ No `--apply` should mean no mutations.
 - Secrets never appear in artifacts or logs.
 
 ## Decisions pending verification
-- Exact OpenMetadata 2.x patch version and matching `openmetadata-ingestion` SDK version.
+- Compatibility with the deployment target, OpenMetadata Server 2.0.8, remains pending live API verification.
 - Precise list of entity categories supported in the chosen SDK and how their domain relations are represented.
 - Treatment of referenced assets outside selected domains: default preserve as external references/report, not migrate automatically.
 - Service-entity creation: sanitize and avoid credentials; verify target pre-existence or require explicit opt-in.

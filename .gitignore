@@ -12,3 +12,5 @@ out/
 exports/
 migration_output/
 *.log
+
+/config.yaml
