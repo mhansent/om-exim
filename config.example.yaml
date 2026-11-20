@@ -1,0 +1,20 @@
+source:
+  server_url: "https://om-source.example.com/api"
+  token_env: "OM_SOURCE_TOKEN"
+target:
+  server_url: "https://om-target.example.com/api"
+  token_env: "OM_TARGET_TOKEN"
+migration:
+  domains:
+    - "Enterprise.Finance"
+  include_subdomains: true
+  include_dependencies: true
+  primary_relationship: direct
+  dependency_policy: required_only
+  external_reference_policy: report
+  output_dir: "./out"
+  batch_size: 100
+import:
+  dry_run: true
+  on_conflict: fail
+  require_exact_version: true
