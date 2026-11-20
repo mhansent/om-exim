@@ -15,7 +15,7 @@ Install `.[dev,sdk]` to inspect the optional OpenMetadata SDK models locally. Se
 
 ## Configure and run
 
-Copy `config.example.yaml` to `config.yaml`, then update the API base URLs and domain FQNs. Use HTTPS for live connections and tokens scoped for read access. Create a local `.env` alongside the YAML and set `OM_SOURCE_TOKEN` and `OM_TARGET_TOKEN`, or provide the same variables in the process environment. Each YAML `token_env` field contains the name of the variable that holds the token. Keep local configuration, credentials, and generated plans with sensitive metadata out of version control.
+Copy `config.example.yaml` to `config.yaml`, then update the API base URLs and domain FQNs. Use HTTPS for live connections and tokens scoped for read access. Copy `.env.example` to `.env` alongside the YAML and fill in `OM_SOURCE_TOKEN` and `OM_TARGET_TOKEN`, or set those variables in the process environment. Each YAML `token_env` field contains the name of the variable that holds the token. Keep local configuration, credentials, and generated plans with sensitive metadata out of version control.
 
 The process environment takes precedence over `.env`. Either can override the YAML connection settings through `OM_SOURCE_SERVER_URL`, `OM_TARGET_SERVER_URL`, `OM_SOURCE_TOKEN_ENV`, and `OM_TARGET_TOKEN_ENV`. Use `--config PATH` to select a different YAML file. Its sibling `.env` is used if present.
 
