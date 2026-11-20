@@ -131,10 +131,24 @@ def api():
                 rows = list(routes[route])
                 after = int(params.get("after", ["0"])[0])
                 end = min(after + int(params["limit"][0]), len(rows))
+                data = []
+                for key in rows[after:end]:
+                    row = routes[route][key]
+                    if "fields" in params or route in {"databaseSchemas", "databases"}:
+                        omitted = row.get("_omit_from_listing", [])
+                        data.append(
+                            {
+                                field: value
+                                for field, value in row.items()
+                                if field not in omitted
+                            }
+                        )
+                    else:
+                        data.append({"id": key})
                 self.send(
                     200,
                     {
-                        "data": [{"id": row} for row in rows[after:end]],
+                        "data": data,
                         "paging": {"after": str(end) if end < len(rows) else None},
                     },
                 )
@@ -242,13 +256,13 @@ def test_plan_does_not_expand_through_product_members_or_inherited_domains(
         ("owners", "missing", "missing_reference"),
         ("tags", "Unknown.Item", "unsupported_reference"),
     }
-    assert ("GET", "source", "tables", {"limit": ["1"], "after": ["1"]}) in calls
     assert (
         "GET",
         "source",
-        "tables/selected",
-        {"fields": ["domains,owners,tags"]},
+        "tables",
+        {"limit": ["1"], "after": ["1"], "fields": ["domains,owners,tags"]},
     ) in calls
+    assert not any(path.startswith("tables/") for _, _, path, _ in calls)
     assert (
         "GET",
         "source",
@@ -259,6 +273,64 @@ def test_plan_does_not_expand_through_product_members_or_inherited_domains(
         method == "GET" and (side == "source" or path == "system/version")
         for method, side, path, _ in calls
     )
+
+
+def test_plan_falls_back_when_table_list_omits_projected_fields(config, api, capsys):
+    api[1]["tables"]["selected"]["_omit_from_listing"] = ["domains", "databaseSchema"]
+    assert main(["plan"]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"]["primary"]["table"] == 1
+    assert (
+        "GET",
+        "source",
+        "tables/selected",
+        {"fields": ["domains,owners,tags"]},
+    ) in api[3]
+
+
+def test_plan_batches_large_table_and_dependency_collections(config, api, capsys):
+    _, routes, _, calls = api
+    config.write_text(config.read_text().replace("batch_size: 1", "batch_size: 100"))
+    service = ref("databaseService", "service")
+    routes["databases"] = {
+        f"db-{i}": entity(f"db-{i}", f"service.db{i}", service=service)
+        for i in range(344)
+    }
+    schemas = {
+        f"schema-{i}": entity(
+            f"schema-{i}",
+            f"service.db{i % 344}.schema{i}",
+            database=ref("database", f"db-{i % 344}"),
+            service=service,
+        )
+        for i in range(2040)
+    }
+    routes["databaseSchemas"] = schemas
+    schemas["schema-0"]["_omit_from_listing"] = ["database"]
+    routes["tables"] = {
+        f"table-{i}": entity(
+            f"table-{i}",
+            f"{schemas[f'schema-{i % 2040}']['fullyQualifiedName']}.table{i}",
+            domains=[ref("domain", "b" if i < 500 else "child")],
+            databaseSchema=ref("databaseSchema", f"schema-{i % 2040}"),
+            database=schemas[f"schema-{i % 2040}"]["database"],
+            service=service,
+        )
+        for i in range(10_000)
+    }
+    assert main(["plan"]) == 0
+    counts = json.loads(capsys.readouterr().out)["counts"]
+    assert counts["primary"]["table"] == 9500
+    assert counts["required_dependency"]["databaseSchema"] == 2040
+    assert counts["required_dependency"]["database"] == 344
+    paths = [path for _, _, path, _ in calls]
+    assert paths.count("tables") == 100
+    assert paths.count("databaseSchemas") == 21
+    assert paths.count("databases") == 4
+    assert [path for path in paths if path.startswith("databaseSchemas/")] == [
+        "databaseSchemas/schema-0"
+    ]
+    assert not any(path.startswith(("tables/", "databases/")) for path in paths)
+    assert len(calls) < 150
 
 
 @pytest.mark.parametrize(
