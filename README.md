@@ -28,6 +28,8 @@ Both commands require the source and target servers to report the same exact sta
 
 `export`, `import`, and `validate` are reserved for later phases and exit before issuing requests. The example's `migration.output_dir` and `import.on_conflict` document settings for those phases.
 
+For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` controls the page size and defaults to 100. Higher values reduce requests and increase the size of each response.
+
 ## Development checks
 
 ```sh

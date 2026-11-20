@@ -32,7 +32,11 @@ class ReadClient:
         return request
 
     def _get(
-        self, route: str, params: dict | None = None, *, allow_missing: bool = False
+        self,
+        route: str,
+        params: dict | None = None,
+        *,
+        unavailable: tuple[int, ...] = (),
     ) -> Document | None:
         base = self.connection.server_url
         if not base.endswith("/v1"):
@@ -49,7 +53,7 @@ class ReadClient:
             raise ReadError(
                 f"{self.label}: GET {route.split('/')[0]} failed."
             ) from None
-        if allow_missing and response.status_code == 404:
+        if response.status_code in unavailable:
             return None
         if response.status_code != 200:
             raise ReadError(
@@ -83,12 +87,29 @@ class ReadClient:
             raise ReadError("The API returned an invalid entity page.")
         return data, paging
 
-    def list_ids(self, kind: str, limit: int) -> Iterator[str]:
+    def list_entities(
+        self,
+        kind: str,
+        limit: int,
+        *,
+        project_fields: bool = False,
+        optional: bool = False,
+        max_pages: int | None = None,
+    ) -> Iterator[Document]:
+        spec = REGISTRY[kind]
         params: dict[str, str | int] = {"limit": limit}
+        if project_fields and spec.fields:
+            params["fields"] = ",".join(spec.fields)
         cursors: set[str] = set()
         ids: set[str] = set()
+        pages = 0
         while True:
-            data, paging = self._page(self._get(REGISTRY[kind].route, params))
+            payload = self._get(
+                spec.route, params, unavailable=(403, 404) if optional else ()
+            )
+            if payload is None:
+                return
+            data, paging = self._page(payload)
             for row in data:
                 entity_id = row.get("id")
                 if not isinstance(entity_id, str) or not entity_id or entity_id in ids:
@@ -96,7 +117,7 @@ class ReadClient:
                         f"The {kind} listing contains a missing or duplicate ID."
                     )
                 ids.add(entity_id)
-                yield entity_id
+                yield row
             after = paging.get("after")
             if after is None:
                 return
@@ -106,6 +127,9 @@ class ReadClient:
                 )
             cursors.add(after)
             params["after"] = after
+            pages += 1
+            if max_pages is not None and pages >= max_pages:
+                return
 
     def detail(
         self, kind: str, value: str, *, by_name: bool = False
@@ -115,7 +139,7 @@ class ReadClient:
             raise ReadError("The API returned an invalid reference identifier.")
         path = ("name/" if by_name else "") + quote(value, safe="")
         fields = {"fields": ",".join(spec.fields)} if spec.fields else None
-        return self._get(f"{spec.route}/{path}", fields, allow_missing=True)
+        return self._get(f"{spec.route}/{path}", fields, unavailable=(404,))
 
     def product_members(self, entity_id: str, limit: int) -> Iterator[Document]:
         route = f"dataProducts/{quote(entity_id, safe='')}/assets"

@@ -9,6 +9,8 @@ from .registry import PRIMARY_TYPES, REGISTRY
 from .settings import Selection
 
 Key = tuple[str, str]
+STRUCTURAL_TYPES = ("databaseSchema", "database")
+MIN_BULK_DEPENDENCIES = 32
 
 
 @dataclass(frozen=True)
@@ -75,13 +77,37 @@ def _reference(raw: object, field: str) -> Key:
 def _details(
     client: ReadClient, kind: str, selection: Selection
 ) -> Iterator[tuple[Entity, Document]]:
-    for entity_id in client.list_ids(kind, selection.batch_size):
+    spec = REGISTRY[kind]
+    required = tuple(rule.field for rule in spec.dependencies if rule.required)
+    projected = kind == "table"
+    for row in client.list_entities(
+        kind, selection.batch_size, project_fields=projected
+    ):
+        entity_id = row["id"]
+        if projected and spec.domain_field in row and _has_projection(row, required):
+            yield _read_entity(kind, row), _planning_fields(kind, row)
+            continue
         payload = client.detail(kind, entity_id)
         if payload is None:
             raise ReadError(
                 f"A listed {kind} disappeared before its detail could be read."
             )
-        yield _read_entity(kind, payload, entity_id), payload
+        yield (
+            _read_entity(kind, payload, entity_id),
+            (_planning_fields(kind, payload) if projected else payload),
+        )
+
+
+def _has_projection(row: Document, required: tuple[str, ...]) -> bool:
+    return bool(row.get("fullyQualifiedName")) and all(
+        row.get(field) is not None for field in required
+    )
+
+
+def _planning_fields(kind: str, row: Document) -> Document:
+    spec = REGISTRY[kind]
+    fields = (*spec.fields, *(rule.field for rule in spec.dependencies))
+    return {field: row[field] for field in fields if field in row}
 
 
 def _domains(
@@ -178,6 +204,44 @@ def _dependencies(
                 yield "tags", "unknown", fqn, True, False
 
 
+def _structural_details(
+    client: ReadClient, primaries: dict[Key, tuple[Entity, Document]], limit: int
+) -> dict[Key, Document]:
+    wanted: dict[str, set[str]] = {kind: set() for kind in STRUCTURAL_TYPES}
+    for entity, payload in primaries.values():
+        if entity.kind != "table":
+            continue
+        for kind in STRUCTURAL_TYPES:
+            ref_kind, entity_id = _reference(payload.get(kind), f"table.{kind}")
+            if ref_kind != kind:
+                raise ReadError(
+                    f"The source returned an unsupported table.{kind} type."
+                )
+            wanted[kind].add(entity_id)
+
+    found = {}
+    for kind, remaining in wanted.items():
+        if len(remaining) < MIN_BULK_DEPENDENCIES:
+            continue
+        required = tuple(
+            rule.field for rule in REGISTRY[kind].dependencies if rule.required
+        )
+        # Leave room for targeted fallback when the wanted IDs are sparse in the collection.
+        for row in client.list_entities(
+            kind, limit, optional=True, max_pages=len(remaining) // 2
+        ):
+            entity_id = row["id"]
+            if entity_id in remaining and _has_projection(row, required):
+                found[kind, entity_id] = _planning_fields(kind, row) | {
+                    "id": entity_id,
+                    "fullyQualifiedName": row["fullyQualifiedName"],
+                }
+                remaining.remove(entity_id)
+                if not remaining:
+                    break
+    return found
+
+
 def build_plan(client: ReadClient, selection: Selection, version: str) -> Document:
     domains = _domains(client, selection)
     primaries: dict[Key, tuple[Entity, Document]] = {}
@@ -224,6 +288,11 @@ def build_plan(client: ReadClient, selection: Selection, version: str) -> Docume
     )
     pending = deque(nodes.values())
     resolved: dict[tuple[str, str, bool], Entity | None] = {}
+    structural = (
+        _structural_details(client, primaries, selection.batch_size)
+        if selection.include_dependencies
+        else {}
+    )
     while pending:
         entity, payload = pending.popleft()
         for field, kind, value, by_name, supported in _dependencies(entity, payload):
@@ -244,7 +313,9 @@ def build_plan(client: ReadClient, selection: Selection, version: str) -> Docume
                 continue
             lookup = kind, value, by_name
             if lookup not in resolved:
-                details = client.detail(kind, value, by_name=by_name)
+                details = structural.get((kind, value)) if not by_name else None
+                if details is None:
+                    details = client.detail(kind, value, by_name=by_name)
                 dependency = (
                     _read_entity(kind, details, None if by_name else value)
                     if details is not None

@@ -8,7 +8,7 @@ The matrix inventories the types named in the current project plan and nearby SD
 | --- | --- | --- | --- |
 | Domain | `/domains` | `CreateDomainRequest` | Exact FQN; detail `parent` references define the hierarchy |
 | Data product | `/dataProducts` | `CreateDataProductRequest` | Direct `domains`; paginated `/{id}/assets` is used for reference reporting |
-| Table | `/tables` | `CreateTableRequest` | Direct `domains`; ignore references with `inherited: true`; resolve schema, database, and service |
+| Table | `/tables` | `CreateTableRequest` | Read projected `domains`, `owners`, and `tags` in pages, with detail fallback; ignore domain references with `inherited: true`; resolve schema, database, and service |
 | Topic | `/topics` | `CreateTopicRequest` | SDK exposes `domains`; direct assignment and service projection pending |
 | Dashboard | `/dashboards` | `CreateDashboardRequest` | SDK exposes `domains` and chart references; direct assignment and service projection pending |
 | Chart | `/charts` | `CreateChartRequest` | SDK exposes `domains`; direct assignment and service projection pending |
