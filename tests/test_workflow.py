@@ -188,13 +188,16 @@ def config(tmp_path, monkeypatch, api):
     return path
 
 
+@pytest.mark.parametrize("server_version", ["2.0.0", "2.0.8"])
 def test_plan_does_not_expand_through_product_members_or_inherited_domains(
-    config, api, capsys
+    config, api, capsys, server_version
 ):
+    _, _, versions, calls = api
+    versions["source"] = versions["target"] = {"version": server_version}
     assert main(["plan"]) == 0
-    _, _, _, calls = api
     stdout = capsys.readouterr().out
     result = json.loads(stdout)
+    assert result["openmetadata_version"] == server_version
     assert "REDACT_ME" not in stdout
     assert "-token" not in stdout
     by_role = {
@@ -275,11 +278,17 @@ def test_preflight_fails_closed(config, api, capsys, version, message):
     assert all(call[2] == "system/version" for call in calls)
 
 
-def test_matching_unverified_patch_is_rejected(config, api, capsys):
-    _, _, versions, _ = api
-    versions["source"] = versions["target"] = {"version": "2.0.8"}
+@pytest.mark.parametrize("server_version", ["2.1.0", "2.0", "2.0.8-rc1"])
+def test_matching_version_outside_stable_20_is_rejected(
+    config, api, capsys, server_version
+):
+    _, _, versions, calls = api
+    versions["source"] = versions["target"] = {"version": server_version}
     assert main(["preflight", "--config", str(config)]) == 1
-    assert "2.0.0 baseline" in capsys.readouterr().err
+    result = capsys.readouterr()
+    assert not result.out
+    assert "stable OpenMetadata 2.0.x" in result.err
+    assert all(call[2] == "system/version" for call in calls)
 
 
 def test_missing_domain_fails_before_asset_reads(config, api, capsys):
@@ -311,8 +320,13 @@ def test_install_and_config_defaults_are_independent(config, api, monkeypatch, c
     result = load_settings(custom, require_selection=True)
     assert result.selection.domains == ("A",)
     assert "token" not in repr(result.source)
+    versions = api[2]
+    versions["source"] = versions["target"] = {"version": "2.0.8"}
     assert main(["preflight", "--config", str(custom)]) == 0
-    assert json.loads(capsys.readouterr().out)["sdk_schema_baseline"] == "2.0.0.0"
+    assert json.loads(capsys.readouterr().out) == {
+        "openmetadata_version": "2.0.8",
+        "sdk_schema_baseline": "2.0.0.0",
+    }
 
 
 def test_invalid_token_fails_before_any_network_request(

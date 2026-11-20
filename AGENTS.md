@@ -3,7 +3,7 @@
 Read `PROJECT_PLAN.md` before making changes. The user's intent is selective OpenMetadata **same-exact-version 2.x** migration. Scope = directly domain-assigned primary entities + descendant subdomains + explicitly necessary dependencies. Avoid graph explosion.
 
 ## Engineering requirements
-- Start by inspecting actual installed SDK/API models. The development baseline is OpenMetadata Server 2.0.0 with SDK 2.0.0.0. Use Python 3.12 for SDK model inspection. The REST CLI supports Python 3.12 through 3.14. Verify compatibility with the deployment target, Server 2.0.8, before enabling it. See `CAPABILITIES.md` for evidence and outstanding checks.
+- Start by inspecting actual installed SDK/API models. The development baseline is OpenMetadata Server 2.0.0 with SDK 2.0.0.0. Use Python 3.12 for SDK model inspection. The REST CLI supports Python 3.12 through 3.14. Preflight accepts matching stable OpenMetadata 2.0.x versions. Validate REST behavior against disposable instances of the deployment target, Server 2.0.8. See `CAPABILITIES.md` for evidence and outstanding checks.
 - Use Python with type hints, small testable modules, pytest, ruff, and no hard-coded secrets.
 - For domain assignment, use entity-specific verified relationships, not a universal assumed `entity.domain` shape.
 - Implement read-only plan/export before import. Do not issue writes in preflight, plan, export, validate, or import dry-run.
