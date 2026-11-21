@@ -51,8 +51,20 @@ REGISTRY = {
         dependencies=(Relationship("service", ("databaseService",), required=True),),
     ),
     "databaseService": EntitySpec("services/databaseServices"),
-    "team": EntitySpec("teams"),
-    "user": EntitySpec("users"),
+    "team": EntitySpec(
+        "teams",
+        ("parents", "defaultRoles", "policies"),
+        (
+            Relationship("parents", ("team",)),
+            Relationship("defaultRoles", ("role",)),
+            Relationship("policies", ("policy",)),
+        ),
+    ),
+    "user": EntitySpec("users", ("teams",)),
+    "role": EntitySpec(
+        "roles", ("policies",), (Relationship("policies", ("policy",)),)
+    ),
+    "policy": EntitySpec("policies", ("location",)),
     "tag": EntitySpec(
         "tags",
         dependencies=(

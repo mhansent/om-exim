@@ -23,15 +23,15 @@ The matrix inventories the types named in the current project plan and nearby SD
 | API endpoint | `/apiEndpoints` | `CreateAPIEndpointRequest` | SDK exposes `domains`; direct assignment and collection dependency pending |
 | Database | `/databases` | `CreateDatabaseRequest` | Structural dependency |
 | Database schema | `/databaseSchemas` | `CreateDatabaseSchemaRequest` | Structural dependency |
-| Database service | `/services/databaseServices` | `CreateDatabaseServiceRequest` | Structural dependency; report identity only |
-| Team | `/teams` | `CreateTeamRequest` | Owner dependency; team membership and roles are outside scope |
-| User | `/users` | `CreateUserRequest` | Owner dependency; credentials and roles are outside scope |
+| Database service | `/services/databaseServices` | `CreateDatabaseServiceRequest` | Structural dependency. Import creates service metadata from name and type |
+| Team | `/teams` | `CreateTeamRequest` | Owner dependency with ancestors, roles, policies, and scoped Group memberships |
+| User | `/users` | `CreateUserRequest` | Owner dependency with scoped Group memberships. Import can create regular users |
 | Classification | `/classifications` | `CreateClassificationRequest` | Taxonomy dependency via tag |
 | Tag | `/tags` | `CreateTagRequest` | Resolve entity-level labels by FQN and follow classification and parent tag |
 | Glossary | `/glossaries` | `CreateGlossaryRequest` | Taxonomy dependency via term |
 | Glossary term | `/glossaryTerms` | `CreateGlossaryTermRequest` | Resolve entity-level labels by FQN and follow glossary and parent term |
-| Role | `/roles` | `CreateRoleRequest` | Dependency policy pending |
-| Policy | `/policies` | `CreatePolicyRequest` | Dependency policy pending |
+| Role | `/roles` | `CreateRoleRequest` | Team default role dependency with policy links |
+| Policy | `/policies` | `CreatePolicyRequest` | Team or role dependency with portable policy rules |
 
 P1 follows only the registered dependency edges. It excludes soft-deleted entities through the baseline REST defaults. Column-level tags, product ports, lineage, custom extensions, and other unregistered relationships are deferred. Product membership is backed by OpenMetadata search, so its completeness depends on the source search index. Live validation on `2.0.8` still needs to verify projections, inherited reference markers, pagination, and exact version reporting against a disposable same-version pair.
 

@@ -7,9 +7,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from .access import policy_rules
 from .client import Document, ReadClient
 from .plan import Progress, build_plan
-from .settings import Selection
+from .settings import Selection, valid_email
 
 ENTITY_FIELDS = {
     "domain": ("domainType",),
@@ -19,6 +20,9 @@ ENTITY_FIELDS = {
     "databaseSchema": ("serviceType",),
     "databaseService": ("serviceType",),
     "team": ("teamType",),
+    "role": ("provider", "allowEdit"),
+    "policy": ("provider", "allowEdit", "enabled"),
+    "user": ("email", "isBot"),
 }
 COLUMN_FIELDS = (
     "name",
@@ -43,6 +47,8 @@ TYPE_LABELS = {
     "tag": "Tags",
     "team": "Teams",
     "user": "Users",
+    "role": "Roles",
+    "policy": "Policies",
 }
 
 
@@ -120,6 +126,19 @@ def export_package(
                 "The source returned a deleted entity in the active entity scope."
             )
         data = _scalars(payload, ("name", *ENTITY_FIELDS.get(kind, ())))
+        if kind == "user":
+            email = data.pop("email", None)
+            if selection.include_user_emails and valid_email(email):
+                data["email"] = email
+        if kind == "policy":
+            if payload.get("location") is not None:
+                raise ExportError(
+                    "This export includes a location-scoped team policy. Its scope cannot be transferred."
+                )
+            try:
+                data["rules"] = policy_rules(payload.get("rules"))
+            except ValueError as error:
+                raise ExportError(str(error)) from None
         if kind == "table":
             data["columns"] = _columns(payload.get("columns"))
         records[kind].append({**entry, "data": data})
@@ -143,6 +162,7 @@ def export_package(
         "created_at": datetime.now(UTC).isoformat(timespec="microseconds"),
         "openmetadata_version": server_version,
         "coverage": plan["coverage"],
+        "team_access": True,
         "selection": {
             **plan["selection"],
             "primary_relationship": "direct",

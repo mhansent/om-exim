@@ -7,9 +7,11 @@ from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
+from .access import TEAM_FIELDS, policy_rules
 from .client import Document
 from .exporter import COLUMN_FIELDS, ENTITY_FIELDS
 from .registry import PRIMARY_TYPES, REGISTRY
+from .settings import valid_email
 
 Key = tuple[str, str]
 ROLES = {"selected_domain", "primary", "required_dependency"}
@@ -26,6 +28,7 @@ class Package:
     entities: dict[Key, Document]
     links: dict[Key, dict[str, list[Key]]]
     reference_count: int
+    team_access: bool = False
 
 
 def _read(path: Path) -> bytes:
@@ -104,11 +107,27 @@ def _validate_entity(row: Document, kind: str) -> None:
     allowed = {"name", *ENTITY_FIELDS.get(kind, ())}
     if kind == "table":
         allowed.add("columns")
+    if kind == "policy":
+        allowed.add("rules")
     if not isinstance(data, dict) or set(data) - allowed:
         raise PackageError("A package entity contains unsupported fields.")
-    for field in set(data) - {"columns"}:
-        if not _string(data[field]):
+    for field in set(data) - {"columns", "rules"}:
+        if field in {"enabled", "allowEdit", "isBot"}:
+            if type(data[field]) is not bool:
+                raise PackageError("A package entity contains an invalid boolean.")
+        elif not _string(data[field]):
             raise PackageError("A package entity contains an invalid field value.")
+    if "email" in data and not valid_email(data["email"]):
+        raise PackageError("A package user has an invalid email address.")
+    if "provider" in data and data["provider"] not in {"system", "user", "automation"}:
+        raise PackageError("A package entity has an unsupported provider.")
+    if kind == "policy":
+        try:
+            rules = policy_rules(data.get("rules"))
+        except ValueError as error:
+            raise PackageError(str(error)) from None
+        if rules != data["rules"]:
+            raise PackageError("A package policy contains unsupported rule fields.")
     if len(data.get("name", "")) > 256:
         raise PackageError("A package entity name exceeds the OpenMetadata limit.")
     if kind == "table":
@@ -142,11 +161,17 @@ def _links(
             allowed["tags"] = ("tag", "glossaryTerm")
         if source[0] == "dataProduct":
             allowed["assets"] = ("table",)
+        if source[0] == "user":
+            allowed["teams"] = ("team",)
         if target[0] not in allowed.get(field, ()):
             raise PackageError("A package relationship is unsupported.")
+        if field == "teams" and entities[target]["data"].get("teamType") != "Group":
+            raise PackageError("A scoped user membership must point to a Group team.")
         targets = result.setdefault(source, {}).setdefault(field, [])
         if target in targets or (
-            targets and field not in {"owners", "domains", "tags", "assets"}
+            targets
+            and field
+            not in {"owners", "domains", "tags", "assets", "teams", *TEAM_FIELDS}
         ):
             raise PackageError("A package relationship is duplicate or ambiguous.")
         targets.append(target)
@@ -216,6 +241,26 @@ def load_package(directory: Path) -> Package:
         if not by_role["selected_domain"]:
             raise PackageError("The package has no selected domains.")
         links = _links(manifest.get("relationships"), entities)
+        team_access = manifest.get("team_access", False)
+        if type(team_access) is not bool:
+            raise PackageError("The package team access marker must be a boolean.")
+        if not team_access and (
+            any(key[0] in {"role", "policy"} for key in entities)
+            or any(
+                set(edges).intersection((*TEAM_FIELDS, "teams"))
+                for edges in links.values()
+            )
+        ):
+            raise PackageError("The package does not declare its team access data.")
+        if team_access and any(
+            isinstance(ref.get("entity"), dict)
+            and ref["entity"].get("kind") in {"team", "role"}
+            and ref.get("relationship") in TEAM_FIELDS
+            for ref in refs
+        ):
+            raise PackageError(
+                "The package contains unresolved team hierarchy or permission references."
+            )
         selection = manifest.get("selection")
         roots = selection.get("domains") if isinstance(selection, dict) else None
         if (
@@ -272,6 +317,7 @@ def load_package(directory: Path) -> Package:
             entities,
             links,
             len(refs),
+            team_access,
         )
     except (OSError, UnicodeError, json.JSONDecodeError, RecursionError):
         raise PackageError(

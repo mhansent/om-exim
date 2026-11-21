@@ -15,8 +15,11 @@ migration:
   output_dir: "./out"
   batch_size: 100
   discovery: full_scan  # Use domain to look up candidates for the selected domains.
+  include_user_emails: false
   # table_batch_size: 2500  # Defaults to batch_size when omitted.
 plan:
   show_progress: true
 import:
-  on_conflict: fail
+  on_conflict: update
+  create_users: true
+  user_emails: {}  # Optional target email by user FQN.

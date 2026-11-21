@@ -230,6 +230,8 @@ def _dependencies(
     entity: Entity,
     payload: Document,
 ) -> Iterator[tuple[str, str, str, bool, bool]]:
+    if entity.kind == "team" and payload.get("teamType") == "Organization":
+        return
     for rule in REGISTRY[entity.kind].dependencies:
         raw = payload.get(rule.field)
         if rule.required and raw is None:
@@ -243,7 +245,12 @@ def _dependencies(
             )
         for item in values:
             kind, value = _reference(item, rule.field)
-            if rule.field == "owners" and item.get("inherited") is True:
+            if item.get("inherited") is True and rule.field in {
+                "owners",
+                "parents",
+                "defaultRoles",
+                "policies",
+            }:
                 continue
             if rule.required and kind not in rule.kinds:
                 raise ReadError(
@@ -471,6 +478,18 @@ def build_plan(
                 relationships.add(
                     Relationship(entity.kind, entity.id, field, kind, dependency.id)
                 )
+    for (kind, user_id), (_, payload) in nodes.items():
+        if kind != "user":
+            continue
+        for raw in _items(payload.get("teams"), "user teams"):
+            team = _reference(raw, "user teams")
+            if (
+                team[0] == "team"
+                and team in nodes
+                and nodes[team][1].get("teamType") == "Group"
+                and raw.get("inherited") is not True
+            ):
+                relationships.add(Relationship("user", user_id, "teams", *team))
     if progress:
         progress(f"Building the JSON report for {len(nodes):,} entities.")
     entries = []

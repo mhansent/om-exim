@@ -126,7 +126,7 @@ Import runs in dry-run mode unless `--apply` is supplied. The exact server versi
 - Compatibility with the deployment target, OpenMetadata Server 2.0.8, remains pending live API verification.
 - Precise list of entity categories supported in the chosen SDK and how their domain relations are represented.
 - Treatment of referenced assets outside selected domains: default preserve as external references/report, not migrate automatically.
-- Service-entity creation: sanitize and avoid credentials; verify target pre-existence or require explicit opt-in.
+- Database service import creates metadata from the exported name and service type. Connection configuration and credentials are managed on the target.
 - Whether lineage, tests, custom properties, and dashboards' chart references are in a future phase.
 
 ## GitHub workflow
