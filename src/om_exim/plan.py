@@ -93,7 +93,7 @@ def _reference(raw: object, field: str) -> Key:
 def _details(
     client: ReadClient,
     kind: str,
-    selection: Selection,
+    batch_size: int,
     *,
     export_columns: bool = False,
 ) -> Iterator[tuple[Entity, Document]]:
@@ -105,9 +105,7 @@ def _details(
         if export_columns and projected
         else ()
     )
-    for row in client.list_entities(
-        kind, selection.batch_size, project_fields=projected
-    ):
+    for row in client.list_entities(kind, batch_size, project_fields=projected):
         entity_id = row["id"]
         if projected and spec.domain_field in row and _has_projection(row, required):
             yield _read_entity(kind, row), _planning_fields(kind, row, retained)
@@ -141,7 +139,7 @@ def _domains(
     domains = {
         entity.key: (entity, payload)
         for entity, payload in _track(
-            _details(client, "domain", selection),
+            _details(client, "domain", selection.batch_size),
             "Scanning domains",
             progress,
             batch_size=selection.batch_size,
@@ -297,12 +295,15 @@ def build_plan(
     for kind in PRIMARY_TYPES:
         field = REGISTRY[kind].domain_field
         assert field is not None
-        rows = _details(client, kind, selection, export_columns=capture is not None)
+        batch_size = selection.batch_size
+        if kind == "table" and selection.table_batch_size is not None:
+            batch_size = selection.table_batch_size
+        rows = _details(client, kind, batch_size, export_columns=capture is not None)
         for entity, payload in _track(
             rows,
             f"Scanning {REGISTRY[kind].route}",
             progress,
-            batch_size=selection.batch_size,
+            batch_size=batch_size,
         ):
             assigned = _assignments(payload, field)
             selected = assigned.intersection(domains)

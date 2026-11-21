@@ -27,6 +27,7 @@ class Selection:
     batch_size: int = 100
     include_subdomains: bool = True
     include_dependencies: bool = True
+    table_batch_size: int | None = None
 
 
 @dataclass(frozen=True)
@@ -86,6 +87,7 @@ def _selection(raw: object) -> Selection:
         {
             "domains",
             "batch_size",
+            "table_batch_size",
             "include_subdomains",
             "include_dependencies",
             "primary_relationship",
@@ -118,11 +120,22 @@ def _selection(raw: object) -> Selection:
     size = settings.get("batch_size", 100)
     if type(size) is not int or not 1 <= size <= 1000:
         raise ConfigError("migration.batch_size must be an integer from 1 to 1000.")
+    table_size = settings.get("table_batch_size", size)
+    if type(table_size) is not int or not 1 <= table_size <= 1_000_000:
+        raise ConfigError(
+            "migration.table_batch_size must be an integer from 1 to 1000000."
+        )
     subdomains = settings.get("include_subdomains", True)
     dependencies = settings.get("include_dependencies", True)
     if type(subdomains) is not bool or type(dependencies) is not bool:
         raise ConfigError("Migration inclusion settings must be booleans.")
-    return Selection(tuple(dict.fromkeys(domains)), size, subdomains, dependencies)
+    return Selection(
+        tuple(dict.fromkeys(domains)),
+        batch_size=size,
+        include_subdomains=subdomains,
+        include_dependencies=dependencies,
+        table_batch_size=table_size,
+    )
 
 
 def load_settings(
