@@ -38,12 +38,19 @@ class ReadClient:
         *,
         unavailable: tuple[int, ...] = (),
     ) -> Document | None:
-        base = self.connection.server_url
-        if not base.endswith("/v1"):
-            base += "/v1"
+        response = self._get_response(route, params, unavailable=unavailable)
+        return self._decode(response) if response is not None else None
+
+    def _url(self, route: str) -> str:
+        base = self.connection.server_url.removesuffix("/v1")
+        return f"{base}/v1/{route}"
+
+    def _get_response(
+        self, route: str, params: dict | None, *, unavailable: tuple[int, ...]
+    ) -> requests.Response | None:
         try:
             response = self.session.get(
-                f"{base}/{route}",
+                self._url(route),
                 params=params,
                 timeout=30,
                 allow_redirects=False,
@@ -59,6 +66,9 @@ class ReadClient:
             raise ReadError(
                 f"{self.label}: GET {route.split('/')[0]} returned HTTP {response.status_code}."
             )
+        return response
+
+    def _decode(self, response: requests.Response) -> Document:
         try:
             payload = response.json()
         except ValueError:
@@ -142,13 +152,22 @@ class ReadClient:
         by_name: bool = False,
         fields: tuple[str, ...] | None = None,
     ) -> Document | None:
+        route, params = self._detail_request(
+            kind, value, by_name=by_name, fields=fields
+        )
+        return self._get(route, params, unavailable=(404,))
+
+    @staticmethod
+    def _detail_request(
+        kind: str, value: str, *, by_name: bool, fields: tuple[str, ...] | None
+    ) -> tuple[str, dict[str, str] | None]:
         spec = REGISTRY[kind]
         if value in {".", ".."}:
             raise ReadError("The API returned an invalid reference identifier.")
         path = ("name/" if by_name else "") + quote(value, safe="")
         projection = spec.fields if fields is None else fields
         params = {"fields": ",".join(projection)} if projection else None
-        return self._get(f"{spec.route}/{path}", params, unavailable=(404,))
+        return f"{spec.route}/{path}", params
 
     def product_members(self, entity_id: str, limit: int) -> Iterator[Document]:
         return self._asset_references("dataProducts", entity_id, limit)

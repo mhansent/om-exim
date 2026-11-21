@@ -1,6 +1,6 @@
 # om-exim
 
-Plan and export selective OpenMetadata migrations between two instances running the same exact server version. The planner and exporter use read-only REST calls. It selects directly assigned tables and data products from exact domain FQNs and their descendants.
+Plan and export selective OpenMetadata migrations between two instances running the same exact server version. Planning and export use read-only REST calls. Import supports dry-run and explicit apply workflows. It selects directly assigned tables and data products from exact domain FQNs and their descendants.
 
 ## Install
 
@@ -26,8 +26,6 @@ The process environment takes precedence over `.env`. Either can override the YA
 ```
 
 These commands require the source and target servers to report the same exact stable OpenMetadata `2.0.x` version. For example, two `2.0.8` servers pass the version check. The plan is JSON on standard output. It reports selected domains, primary entities, required dependencies, their known relationships, and external, missing, unsupported, or excluded references. Membership in a selected data product does not add an asset to the plan. OpenMetadata permissions can limit the entities visible to the source token.
-
-`import` and `validate` are reserved for later phases and exit before issuing requests.
 
 The planner includes all descendants of the configured domain FQNs by default. They appear alongside the configured roots as `selected_domain` entries in `entities`, with totals under `counts.selected_domain`. The planner also includes supported required dependencies by default. They appear as `required_dependency` entries, with totals under `counts.required_dependency`. Use `migration.include_subdomains` and `migration.include_dependencies` to control these options.
 
@@ -66,6 +64,28 @@ Export uses the table columns already present in paginated REST responses. When 
 The package contains one UTF-8 NDJSON file per exported entity type. Each row records the source identity, role, and allowlisted structural metadata, including table columns. `manifest.json` records the package schema version, UTC creation time, OpenMetadata version, selection rules, counts, planned relationships, references to review, and SHA-256 hashes of the NDJSON files. Rows and checksums are deterministic for the same source metadata. The creation time reflects the current run.
 
 The exporter uses the active entity scope and omits free-text descriptions, service connection settings, user contact fields, profiles, sample data, column tags, and unregistered relationships. Identifiers and ownership relationships can still contain sensitive information. Store the package privately.
+
+## Import and validate a package
+
+Configure the target URL and token, then run a dry-run before applying.
+
+```sh
+.venv/bin/om-exim import --package ./out
+.venv/bin/om-exim import --package ./out --apply
+.venv/bin/om-exim validate --package ./out
+```
+
+Import and validation use the target only. The target must report the same exact OpenMetadata version as the package. Import checks package hashes, counts, entity identities, scope, and relationships before writing. Dry-run is the default and reports planned actions and existing target IDs as JSON. Apply creates entities in dependency order, restores supported relationships using target IDs and FQNs, and reports the source-to-target ID mapping. Validation is read-only and returns a nonzero exit code when expected entities or fields are missing or different. It checks the package footprint and allows additional target entities and metadata.
+
+Control conflicts through `import.on_conflict` or override it with `--on-conflict fail|skip|update`.
+
+- `fail` is the default. Existing writable entities stop preflight before any writes.
+- `skip` reuses existing entities and leaves their metadata in place. They can serve as relationship targets.
+- `update` changes exported type and column fields and adds planned relationships. It preserves target-only columns, descriptions, and existing direct relationships. PATCH sends `If-Match` when OpenMetadata provides an ETag.
+
+Database services, teams, and users must already exist by exact FQN on the target. New domains, data products, classifications, tags, glossaries, and glossary terms receive a standard description indicating that the source description was omitted. Imported tag labels are added as suggested labels because the package contains no original approval state. External and unresolved references remain in the manifest for review. A missing required structural dependency blocks import.
+
+Apply records confirmed creations in a local checkpoint next to the package, such as `.out.import-state.ndjson`. Repeat with the same package and checkpoint to resume and reconcile relationships. Use `--checkpoint PATH` to choose another location. If a request fails after the target commits but before the creation is recorded, review that entity on the target before explicitly reusing it with `skip` or `update`. Keep the checkpoint with the package and remove a leftover lock only after confirming no import is running.
 
 ## Development checks
 
