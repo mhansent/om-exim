@@ -100,20 +100,19 @@ def _details(
     spec = REGISTRY[kind]
     required = tuple(rule.field for rule in spec.dependencies if rule.required)
     projected = kind == "table"
-    extra = ("columns",) if export_columns and projected else ()
-    retained = ("name", "tableType", "deleted", *extra) if extra else ()
+    retained = (
+        ("name", "tableType", "deleted", "columns")
+        if export_columns and projected
+        else ()
+    )
     for row in client.list_entities(
-        kind, selection.batch_size, project_fields=projected, extra_fields=extra
+        kind, selection.batch_size, project_fields=projected
     ):
         entity_id = row["id"]
-        if (
-            projected
-            and spec.domain_field in row
-            and _has_projection(row, required + extra)
-        ):
+        if projected and spec.domain_field in row and _has_projection(row, required):
             yield _read_entity(kind, row), _planning_fields(kind, row, retained)
             continue
-        payload = client.detail(kind, entity_id, extra_fields=extra)
+        payload = client.detail(kind, entity_id)
         if payload is None:
             raise ReadError(
                 f"A listed {kind} disappeared before its detail could be read."
@@ -308,6 +307,23 @@ def build_plan(
             assigned = _assignments(payload, field)
             selected = assigned.intersection(domains)
             if selected:
+                if (
+                    capture is not None
+                    and kind == "table"
+                    and payload.get("columns") is None
+                ):
+                    # Requesting both tags and columns also loads unused column tags.
+                    detail = client.detail(kind, entity.id, fields=(field, "columns"))
+                    if (
+                        detail is None
+                        or detail.get("deleted") is True
+                        or _read_entity(kind, detail, entity.id) != entity
+                        or _assignments(detail, field) != assigned
+                    ):
+                        raise ReadError(
+                            "A selected table changed before its columns could be read."
+                        )
+                    payload["columns"] = detail.get("columns")
                 primaries[entity.key] = entity, payload
                 for domain_kind, domain_id in selected:
                     relationships.add(

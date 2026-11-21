@@ -39,6 +39,8 @@ Set `plan.show_progress: true` in `config.yaml` to show the current stage and ru
 
 Set `migration.output_dir` to a new directory. Relative paths use the current working directory. The default is `./out`. The exporter publishes the directory only after writing all files and refuses to overwrite an existing directory. On success it prints a table of exported entity counts and the number of references to review. `plan.show_progress` also controls the planning and writing progress shown during export.
 
+Export uses the table columns already present in paginated REST responses. When a selected table is missing its columns, export fetches them separately. SHA-256 checksums are computed while writing the NDJSON files.
+
 The package contains one UTF-8 NDJSON file per exported entity type. Each row records the source identity, role, and allowlisted structural metadata, including table columns. `manifest.json` records the package schema version, UTC creation time, OpenMetadata version, selection rules, counts, planned relationships, references to review, and SHA-256 hashes of the NDJSON files. Rows and checksums are deterministic for the same source metadata. The creation time reflects the current run.
 
 The exporter uses the active entity scope and omits free-text descriptions, service connection settings, user contact fields, profiles, sample data, column tags, and unregistered relationships. Identifiers and ownership relationships can still contain sensitive information. Store the package privately.

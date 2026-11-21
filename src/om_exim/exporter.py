@@ -79,7 +79,7 @@ def _columns(raw: object) -> list[Document]:
 
 
 def _encode(
-    document: Document, secrets: tuple[str, ...], *, indent: int | None = None
+    document: Document, token_patterns: tuple[bytes, ...], *, indent: int | None = None
 ) -> bytes:
     serialized = json.dumps(
         document,
@@ -89,13 +89,12 @@ def _encode(
         indent=indent,
         separators=(",", ":") if indent is None else None,
     )
-    for secret in secrets:
-        quoted = json.dumps(secret, ensure_ascii=False)
-        if (quoted[1:-1] if len(secret) >= 8 else quoted) in serialized:
-            raise ExportError(
-                "A connection token matched export data. The package was not written."
-            )
-    return (serialized + "\n").encode("utf-8")
+    line = (serialized + "\n").encode("utf-8")
+    if any(pattern in line for pattern in token_patterns):
+        raise ExportError(
+            "A connection token matched export data. The package was not written."
+        )
+    return line
 
 
 def export_package(
@@ -160,6 +159,11 @@ def export_package(
 
     if progress:
         progress("Writing and hashing export files...")
+    patterns = []
+    for token in tokens:
+        quoted = json.dumps(token, ensure_ascii=False)
+        patterns.append((quoted[1:-1] if len(token) >= 8 else quoted).encode("utf-8"))
+    token_patterns = tuple(patterns)
     try:
         output.parent.mkdir(parents=True, exist_ok=True)
         with TemporaryDirectory(prefix=".om-exim-", dir=output.parent) as directory:
@@ -167,18 +171,21 @@ def export_package(
             staging.mkdir(mode=0o700)
             for kind, rows in records.items():
                 path = staging / f"{kind}.ndjson"
+                checksum = hashlib.sha256()
                 with path.open("wb") as stream:
                     for row in rows:
-                        stream.write(_encode(row, tokens))
-                with path.open("rb") as stream:
-                    checksum = hashlib.file_digest(stream, "sha256").hexdigest()
+                        line = _encode(row, token_patterns)
+                        stream.write(line)
+                        checksum.update(line)
                 manifest["files"][kind] = {
                     "path": path.name,
                     "count": counts[kind],
-                    "sha256": checksum,
+                    "sha256": checksum.hexdigest(),
                 }
 
-            (staging / "manifest.json").write_bytes(_encode(manifest, tokens, indent=2))
+            (staging / "manifest.json").write_bytes(
+                _encode(manifest, token_patterns, indent=2)
+            )
             if output.exists() or output.is_symlink():
                 raise ExportError(
                     "The export directory already exists. Choose a new migration.output_dir."
