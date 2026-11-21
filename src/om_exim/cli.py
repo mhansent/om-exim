@@ -8,6 +8,7 @@ from pathlib import Path
 import requests
 
 from .client import BASELINE_SDK, ReadClient, ReadError, preflight
+from .exporter import ExportError, export_package, format_summary
 from .plan import build_plan
 from .settings import ConfigError, load_settings
 
@@ -21,7 +22,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("preflight", "plan", "export", "import", "validate"):
-        deferred = name in {"export", "import", "validate"}
+        deferred = name in {"import", "validate"}
         command = commands.add_parser(
             name, help="reserved for a later phase" if deferred else None
         )
@@ -33,12 +34,14 @@ def main(argv: list[str] | None = None) -> int:
             mode.add_argument("--apply", action="store_true")
             mode.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
-    if args.command not in {"preflight", "plan"}:
+    if args.command in {"import", "validate"}:
         print(f"{args.command} is reserved for a later phase.", file=sys.stderr)
         return 2
 
     try:
-        settings = load_settings(args.config, require_selection=args.command == "plan")
+        settings = load_settings(
+            args.config, require_selection=args.command != "preflight"
+        )
         progress = (
             _print_progress if settings.selection and settings.show_progress else None
         )
@@ -53,13 +56,27 @@ def main(argv: list[str] | None = None) -> int:
                     "openmetadata_version": version,
                     "sdk_schema_baseline": BASELINE_SDK,
                 }
-            else:
+            elif args.command == "plan":
                 result = build_plan(
                     source, settings.selection, version, progress=progress
                 )
-    except (ConfigError, ReadError) as error:
+            else:
+                counts, reference_count = export_package(
+                    source,
+                    settings.selection,
+                    version,
+                    settings.output_dir,
+                    tokens=(settings.source.token, settings.target.token),
+                    progress=progress,
+                )
+    except (ConfigError, ReadError, ExportError) as error:
         print(f"om-exim: {error}", file=sys.stderr)
         return 1
+    if args.command == "export":
+        print(f"Export written to {settings.output_dir}")
+        print(format_summary(counts))
+        print(f"References to review: {reference_count:,}")
+        return 0
     print(json.dumps(result, indent=2, ensure_ascii=False))
     if progress:
         progress("Plan complete.")

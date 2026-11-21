@@ -93,13 +93,15 @@ class ReadClient:
         limit: int,
         *,
         project_fields: bool = False,
+        extra_fields: tuple[str, ...] = (),
         optional: bool = False,
         max_pages: int | None = None,
     ) -> Iterator[Document]:
         spec = REGISTRY[kind]
         params: dict[str, str | int] = {"limit": limit}
-        if project_fields and spec.fields:
-            params["fields"] = ",".join(spec.fields)
+        fields = (spec.fields if project_fields else ()) + extra_fields
+        if fields:
+            params["fields"] = ",".join(fields)
         cursors: set[str] = set()
         ids: set[str] = set()
         pages = 0
@@ -132,13 +134,19 @@ class ReadClient:
                 return
 
     def detail(
-        self, kind: str, value: str, *, by_name: bool = False
+        self,
+        kind: str,
+        value: str,
+        *,
+        by_name: bool = False,
+        extra_fields: tuple[str, ...] = (),
     ) -> Document | None:
         spec = REGISTRY[kind]
         if value in {".", ".."}:
             raise ReadError("The API returned an invalid reference identifier.")
         path = ("name/" if by_name else "") + quote(value, safe="")
-        fields = {"fields": ",".join(spec.fields)} if spec.fields else None
+        projection = spec.fields + extra_fields
+        fields = {"fields": ",".join(projection)} if projection else None
         return self._get(f"{spec.route}/{path}", fields, unavailable=(404,))
 
     def product_members(self, entity_id: str, limit: int) -> Iterator[Document]:
