@@ -14,6 +14,7 @@ migration:
   external_reference_policy: report
   output_dir: "./out"
   batch_size: 100
+  discovery: full_scan  # Use domain to look up candidates for the selected domains.
   # table_batch_size: 2500  # Defaults to batch_size when omitted.
 plan:
   show_progress: true

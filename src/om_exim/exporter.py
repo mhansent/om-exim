@@ -130,6 +130,7 @@ def export_package(
     counts = {kind: len(rows) for kind, rows in records.items()}
     references = plan["references"]
     warnings = [
+        *plan["warnings"],
         "The package contains allowlisted structural metadata and planned relationships.",
         "Free-text descriptions, profile data, and service connection settings are omitted.",
     ]

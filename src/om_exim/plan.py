@@ -12,6 +12,10 @@ Key = tuple[str, str]
 STRUCTURAL_TYPES = ("databaseSchema", "database")
 MIN_BULK_DEPENDENCIES = 32
 Progress = Callable[[str], None]
+DOMAIN_DISCOVERY_WARNING = (
+    "Domain discovery uses the OpenMetadata search index for table candidates. "
+    "A stale or unavailable index can omit tables. Use full_scan to verify completeness."
+)
 
 
 def _track[T](
@@ -196,6 +200,32 @@ def _assignments(payload: Document, field: str) -> set[Key]:
     return assignments
 
 
+def _domain_candidates(
+    client: ReadClient, kind: str, domains: Iterator[Entity], batch_size: int
+) -> Iterator[tuple[Entity, Document]]:
+    seen: set[str] = set()
+    for domain in domains:
+        if kind == "table":
+            refs = client.domain_assets(domain.id, batch_size)
+            candidates = (_reference(ref, "domain assets") for ref in refs)
+        elif kind == "dataProduct":
+            products = client.list_entities(kind, batch_size, domain=domain.fqn)
+            candidates = ((kind, row["id"]) for row in products)
+        else:
+            raise ReadError(f"Domain discovery is unsupported for {kind}.")
+        for candidate_kind, entity_id in candidates:
+            if candidate_kind != kind or entity_id in seen:
+                continue
+            seen.add(entity_id)
+            payload = client.detail(kind, entity_id)
+            if payload is None or payload.get("deleted") is True:
+                raise ReadError(
+                    f"A {kind} candidate is no longer available. "
+                    "Refresh the source index or use migration.discovery: full_scan."
+                )
+            yield _read_entity(kind, payload, entity_id), payload
+
+
 def _dependencies(
     entity: Entity,
     payload: Document,
@@ -292,16 +322,27 @@ def build_plan(
     primaries: dict[Key, tuple[Entity, Document]] = {}
     references: set[Reference] = set()
     relationships: set[Relationship] = set()
+    by_domain = selection.discovery == "domain"
     for kind in PRIMARY_TYPES:
         field = REGISTRY[kind].domain_field
         assert field is not None
         batch_size = selection.batch_size
-        if kind == "table" and selection.table_batch_size is not None:
-            batch_size = selection.table_batch_size
-        rows = _details(client, kind, batch_size, export_columns=capture is not None)
+        route = REGISTRY[kind].route
+        if by_domain:
+            rows = _domain_candidates(
+                client, kind, (entity for entity, _ in domains.values()), batch_size
+            )
+            label = f"Checking domain candidates for {route}"
+        else:
+            if kind == "table" and selection.table_batch_size is not None:
+                batch_size = selection.table_batch_size
+            rows = _details(
+                client, kind, batch_size, export_columns=capture is not None
+            )
+            label = f"Scanning {route}"
         for entity, payload in _track(
             rows,
-            f"Scanning {REGISTRY[kind].route}",
+            label,
             progress,
             batch_size=batch_size,
         ):
@@ -371,7 +412,7 @@ def build_plan(
     resolved: dict[tuple[str, str, bool], Entity | None] = {}
     structural = (
         _structural_details(client, primaries, selection.batch_size, progress)
-        if selection.include_dependencies
+        if selection.include_dependencies and not by_domain
         else {}
     )
 
@@ -446,6 +487,7 @@ def build_plan(
         "openmetadata_version": version,
         "selection": asdict(selection),
         "coverage": list(PRIMARY_TYPES),
+        "warnings": [DOMAIN_DISCOVERY_WARNING] if by_domain else [],
         "counts": {
             role: dict(
                 sorted(
