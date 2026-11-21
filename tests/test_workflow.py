@@ -310,17 +310,31 @@ def test_plan_falls_back_when_table_list_omits_projected_fields(config, api, cap
 
 
 @pytest.mark.parametrize(
-    "command, batch_size, schema_pages, database_pages",
-    [("plan", 100, 21, 4), ("plan", 1000, 3, 1), ("export", 1000, 3, 1)],
+    "command, batch_size, table_batch_size, schema_pages, database_pages",
+    [
+        ("plan", 100, None, 21, 4),
+        ("plan", 1000, 2500, 3, 1),
+        ("export", 1000, 2500, 3, 1),
+    ],
 )
 def test_batches_large_table_and_dependency_collections(
-    config, api, capsys, command, batch_size, schema_pages, database_pages
+    config,
+    api,
+    capsys,
+    command,
+    batch_size,
+    table_batch_size,
+    schema_pages,
+    database_pages,
 ):
     _, routes, _, calls = api
-    config.write_text(
-        config.read_text().replace("batch_size: 1", f"batch_size: {batch_size}")
-        + "\nplan:\n  show_progress: true\n"
-    )
+    settings = yaml.safe_load(config.read_text())
+    settings["migration"]["batch_size"] = batch_size
+    if table_batch_size is not None:
+        settings["migration"]["table_batch_size"] = table_batch_size
+    settings["plan"] = {"show_progress": True}
+    config.write_text(yaml.safe_dump(settings))
+    table_limit = table_batch_size or batch_size
     service = ref("databaseService", "service")
     routes["databases"] = {
         f"db-{i}": entity(f"db-{i}", f"service.db{i}", service=service)
@@ -354,10 +368,13 @@ def test_batches_large_table_and_dependency_collections(
     if command == "export":
         manifest = json.loads((config.parent / "out/manifest.json").read_text())
         counts = manifest["counts_by_role"]
+        assert manifest["selection"]["table_batch_size"] == table_limit
         assert "Writing and hashing export files..." in captured.err
         assert "9,500" in captured.out
     else:
-        counts = json.loads(captured.out)["counts"]
+        report = json.loads(captured.out)
+        counts = report["counts"]
+        assert report["selection"]["table_batch_size"] == table_limit
         assert captured.err.endswith("om-exim: Plan complete.\n")
     assert "Checking source and target OpenMetadata versions." in captured.err
     assert "Scanning domains..." in captured.err
@@ -369,7 +386,7 @@ def test_batches_large_table_and_dependency_collections(
         "om-exim: Scanning tables...",
         *(
             f"om-exim: Scanning tables: {count:,} processed."
-            for count in range(batch_size, 10_001, batch_size)
+            for count in range(table_limit, 10_001, table_limit)
         ),
         "om-exim: Scanning tables: 10,000 processed in total.",
     ]
@@ -380,10 +397,19 @@ def test_batches_large_table_and_dependency_collections(
     assert counts["required_dependency"]["databaseSchema"] == 2040
     assert counts["required_dependency"]["database"] == 344
     paths = [path for _, _, path, _ in calls]
-    assert paths.count("tables") == 10_000 // batch_size
+    assert paths.count("tables") == 10_000 // table_limit
     assert {
         tuple(params["fields"]) for _, _, path, params in calls if path == "tables"
     } == {("domains,owners,tags",)}
+    assert {params["limit"][0] for _, _, path, params in calls if path == "tables"} == {
+        str(table_limit)
+    }
+    assert (
+        "GET",
+        "source",
+        "dataProducts/product/assets",
+        {"limit": [str(batch_size)], "offset": ["0"]},
+    ) in calls
     assert paths.count("databaseSchemas") == schema_pages
     assert paths.count("databases") == database_pages
     assert [path for path in paths if path.startswith("databaseSchemas/")] == [
@@ -391,6 +417,26 @@ def test_batches_large_table_and_dependency_collections(
     ]
     assert not any(path.startswith(("tables/", "databases/")) for path in paths)
     assert len(calls) < 150
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("batch_size", 1001),
+        ("table_batch_size", 0),
+        ("table_batch_size", 1_000_001),
+        ("table_batch_size", True),
+    ],
+)
+def test_invalid_batch_limit_fails_before_any_network_request(
+    config, api, capsys, field, value
+):
+    settings = yaml.safe_load(config.read_text())
+    settings["migration"][field] = value
+    config.write_text(yaml.safe_dump(settings))
+    assert main(["plan"]) == 1
+    assert f"migration.{field} must be an integer" in capsys.readouterr().err
+    assert not api[3]
 
 
 def test_invalid_progress_setting_fails_before_any_network_request(config, api, capsys):

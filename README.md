@@ -31,9 +31,16 @@ These commands require the source and target servers to report the same exact st
 
 The planner includes all descendants of the configured domain FQNs by default. They appear alongside the configured roots as `selected_domain` entries in `entities`, with totals under `counts.selected_domain`. The planner also includes supported required dependencies by default. They appear as `required_dependency` entries, with totals under `counts.required_dependency`. Use `migration.include_subdomains` and `migration.include_dependencies` to control these options.
 
-For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` controls the page size and defaults to 100. Higher values reduce requests and increase the size of each response.
+For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` defaults to 100 and accepts 1–1,000. It controls pagination for general reads, including data product membership. Set `migration.table_batch_size` to use a separate page size for table scans in both `plan` and `export`. It accepts 1–1,000,000 and inherits `migration.batch_size` when omitted. Larger table pages reduce requests and increase response size and memory use.
 
-Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. Running counts are reported in increments of `migration.batch_size`. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
+```yaml
+migration:
+  # Keep your existing domain selection and migration options here.
+  batch_size: 1000
+  table_batch_size: 2500
+```
+
+Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. Table scan progress follows the effective table batch size. Other running counts use `migration.batch_size`. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
 
 ## Export package
 
