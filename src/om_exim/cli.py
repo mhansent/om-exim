@@ -9,8 +9,11 @@ import requests
 
 from .client import BASELINE_SDK, ReadClient, ReadError, preflight
 from .exporter import ExportError, export_package, format_summary
+from .importer import MigrationImportError, import_package, validate_target
+from .package import PackageError, load_package
 from .plan import DOMAIN_DISCOVERY_WARNING, build_plan
 from .settings import ConfigError, load_settings
+from .target import TargetClient
 
 
 def _print_progress(message: str) -> None:
@@ -22,10 +25,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--config", type=Path, default=Path("config.yaml"))
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("preflight", "plan", "export", "import", "validate"):
-        deferred = name in {"import", "validate"}
-        command = commands.add_parser(
-            name, help="reserved for a later phase" if deferred else None
-        )
+        command = commands.add_parser(name)
         command.add_argument("--config", type=Path, default=argparse.SUPPRESS)
         if name in {"import", "validate"}:
             command.add_argument("--package", type=Path, required=True)
@@ -33,12 +33,39 @@ def main(argv: list[str] | None = None) -> int:
             mode = command.add_mutually_exclusive_group()
             mode.add_argument("--apply", action="store_true")
             mode.add_argument("--dry-run", action="store_true")
+            command.add_argument("--on-conflict", choices=("fail", "skip", "update"))
+            command.add_argument("--checkpoint", type=Path)
     args = parser.parse_args(argv)
-    if args.command in {"import", "validate"}:
-        print(f"{args.command} is reserved for a later phase.", file=sys.stderr)
-        return 2
 
     try:
+        if args.command in {"import", "validate"}:
+            package = load_package(args.package)
+            settings = load_settings(
+                args.config, require_selection=False, require_source=False
+            )
+            with requests.Session() as target_session:
+                target = TargetClient(settings.target, "Target", target_session)
+                if target.version() != package.version:
+                    raise MigrationImportError(
+                        "The target server must report exactly the package's OpenMetadata version."
+                    )
+                if args.command == "import":
+                    package_directory = args.package.resolve()
+                    checkpoint = args.checkpoint or (
+                        package_directory.parent
+                        / f".{package_directory.name}.import-state.ndjson"
+                    )
+                    result = import_package(
+                        target,
+                        package,
+                        checkpoint,
+                        policy=args.on_conflict or settings.on_conflict,
+                        apply=args.apply,
+                    )
+                else:
+                    result = validate_target(target, package)
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+            return int(args.command == "validate" and not result["valid"])
         settings = load_settings(
             args.config, require_selection=args.command != "preflight"
         )
@@ -48,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         if settings.selection and settings.selection.discovery == "domain":
             print(f"om-exim: {DOMAIN_DISCOVERY_WARNING}", file=sys.stderr)
         with requests.Session() as source_session, requests.Session() as target_session:
+            assert settings.source is not None
             source = ReadClient(settings.source, "Source", source_session)
             target = ReadClient(settings.target, "Target", target_session)
             if progress:
@@ -71,7 +99,13 @@ def main(argv: list[str] | None = None) -> int:
                     tokens=(settings.source.token, settings.target.token),
                     progress=progress,
                 )
-    except (ConfigError, ReadError, ExportError) as error:
+    except (
+        ConfigError,
+        ReadError,
+        ExportError,
+        PackageError,
+        MigrationImportError,
+    ) as error:
         print(f"om-exim: {error}", file=sys.stderr)
         return 1
     if args.command == "export":

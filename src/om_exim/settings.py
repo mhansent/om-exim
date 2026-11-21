@@ -33,11 +33,12 @@ class Selection:
 
 @dataclass(frozen=True)
 class Settings:
-    source: Connection
+    source: Connection | None
     target: Connection
     selection: Selection | None
     show_progress: bool = False
     output_dir: Path = Path("out")
+    on_conflict: str = "fail"
 
 
 def _mapping(value: object, location: str, keys: set[str]) -> dict:
@@ -145,7 +146,11 @@ def _selection(raw: object) -> Selection:
 
 
 def load_settings(
-    path: Path, *, require_selection: bool, environ: Mapping[str, str] | None = None
+    path: Path,
+    *,
+    require_selection: bool,
+    require_source: bool = True,
+    environ: Mapping[str, str] | None = None,
 ) -> Settings:
     try:
         with path.open(encoding="utf-8") as config_file:
@@ -172,10 +177,17 @@ def load_settings(
         or "\x00" in output_dir
     ):
         raise ConfigError("migration.output_dir must be a non-empty path.")
+    import_config = _mapping(config.get("import", {}), "import", {"on_conflict"})
+    on_conflict = import_config.get("on_conflict", "fail")
+    if on_conflict not in ("fail", "skip", "update"):
+        raise ConfigError("import.on_conflict must be fail, skip, or update.")
     return Settings(
-        _connection("source", config.get("source", {}), values),
+        _connection("source", config.get("source", {}), values)
+        if require_source
+        else None,
         _connection("target", config.get("target", {}), values),
         selection,
         show_progress,
         Path(output_dir),
+        on_conflict,
     )

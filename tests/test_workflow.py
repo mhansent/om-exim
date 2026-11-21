@@ -742,8 +742,312 @@ def test_invalid_token_fails_before_any_network_request(
     assert not api[3]
 
 
-@pytest.mark.parametrize("mode", [[], ["--dry-run"], ["--apply"]])
-def test_deferred_import_cannot_write(api, capsys, mode):
-    assert main(["import", "--package", "package", *mode]) == 2
-    assert "reserved for a later phase" in capsys.readouterr().err
-    assert not api[3]
+@pytest.fixture
+def migration_package(config, api, capsys):
+    routes = api[1]
+    api[2]["source"] = api[2]["target"] = {"version": "2.0.8"}
+    for domain in routes["domains"].values():
+        domain.update(
+            name=domain["fullyQualifiedName"].split(".")[-1], domainType="Aggregate"
+        )
+    for table in routes["tables"].values():
+        table.update(name=table["fullyQualifiedName"].split(".")[-1], columns=[])
+    routes["tables"]["selected"]["columns"] = [
+        {"name": "customer_id", "dataType": "BIGINT"}
+    ]
+    routes["dataProducts"]["product"].update(
+        name="product", fullyQualifiedName="product"
+    )
+    for route in (
+        "databaseSchemas",
+        "databases",
+        "tags",
+        "classifications",
+        "glossaryTerms",
+        "glossaries",
+    ):
+        for row in routes[route].values():
+            row["name"] = row["fullyQualifiedName"].split(".")[-1]
+    assert main(["export"]) == 0
+    capsys.readouterr()
+    return config.parent / "out"
+
+
+@pytest.fixture
+def import_target(config, migration_package):
+    collections = {
+        "domains": "domain",
+        "dataProducts": "dataProduct",
+        "tables": "table",
+        "databaseSchemas": "databaseSchema",
+        "databases": "database",
+        "services/databaseServices": "databaseService",
+        "teams": "team",
+        "users": "user",
+        "tags": "tag",
+        "classifications": "classification",
+        "glossaries": "glossary",
+        "glossaryTerms": "glossaryTerm",
+    }
+    state = {kind: {} for kind in collections.values()}
+    state["databaseService"]["service"] = entity("t-service", "service")
+    state["team"]["Analysts"] = entity("t-team", "Analysts")
+    traffic = []
+    control = {"version": "2.0.8", "reject": None}
+
+    class MigrationHandler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def send(self, status, payload):
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            if "id" in payload:
+                self.send_header("ETag", '"fixture-etag"')
+            self.end_headers()
+            self.wfile.write(json.dumps(payload).encode())
+
+        def route(self):
+            from urllib.parse import unquote
+
+            return unquote(urlsplit(self.path).path).removeprefix("/api/v1/")
+
+        def body(self):
+            return json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+
+        def address(self, route):
+            collection = next(
+                (base for base in collections if route.startswith(base + "/")), None
+            )
+            if collection is None:
+                return None, None
+            return collections[collection], route.removeprefix(collection + "/")
+
+        def do_GET(self):
+            route = self.route()
+            traffic.append(("GET", route, None))
+            assert self.headers["Authorization"] == "Bearer target-token"
+            if route == "system/version":
+                self.send(200, {"version": control["version"]})
+                return
+            kind, identifier = self.address(route)
+            if identifier.startswith("name/"):
+                value = state[kind].get(identifier.removeprefix("name/"))
+            else:
+                value = next(
+                    (item for item in state[kind].values() if item["id"] == identifier),
+                    None,
+                )
+            self.send(200 if value else 404, value or {"message": "DO_NOT_SHOW"})
+
+        def do_POST(self):
+            route = self.route()
+            body = self.body()
+            kind = collections[route]
+            traffic.append(("POST", route, body))
+            if kind == control["reject"]:
+                self.send(500, {"message": "DO_NOT_SHOW"})
+                return
+            assert "id" not in body
+            current = dict(body)
+            prefix = None
+            for field, other in {
+                "service": "databaseService",
+                "database": "database",
+                "databaseSchema": "databaseSchema",
+                "classification": "classification",
+                "glossary": "glossary",
+                "parent": kind,
+            }.items():
+                if field in body:
+                    parent = state[other][body[field]]
+                    current[field] = ref(other, parent["id"])
+                    prefix = body[field]
+                    if kind == "databaseSchema" and field == "database":
+                        current["service"] = parent["service"]
+                    if kind == "table" and field == "databaseSchema":
+                        current["service"] = parent["service"]
+                        current["database"] = parent["database"]
+            if "domains" in body:
+                current["domains"] = [
+                    ref("domain", state["domain"][domain]["id"])
+                    for domain in body["domains"]
+                ]
+            fqn = f"{prefix}.{body['name']}" if prefix else body["name"]
+            if fqn in state[kind]:
+                self.send(409, {})
+                return
+            current.update(id=f"t-{kind}-{len(state[kind])}", fullyQualifiedName=fqn)
+            state[kind][fqn] = current
+            self.send(201, current)
+
+        def do_PATCH(self):
+            route = self.route()
+            changes = self.body()
+            traffic.append(("PATCH", route, changes))
+            assert self.headers["Content-Type"] == "application/json-patch+json"
+            assert self.headers["If-Match"] == '"fixture-etag"'
+            kind, identifier = self.address(route)
+            current = next(
+                item for item in state[kind].values() if item["id"] == identifier
+            )
+            for change in changes:
+                assert change["op"] == "add"
+                *path, field = change["path"].lstrip("/").split("/")
+                location = current
+                for segment in path:
+                    location = (
+                        location[int(segment)]
+                        if isinstance(location, list)
+                        else location[segment]
+                    )
+                if field == "-":
+                    location.append(change["value"])
+                else:
+                    location[field] = change["value"]
+            self.send(200, current)
+
+        def do_PUT(self):
+            route = self.route()
+            body = self.body()
+            traffic.append(("PUT", route, body))
+            product = state["dataProduct"][
+                route.removeprefix("dataProducts/").removesuffix("/assets/add")
+            ]
+            for asset in body["assets"]:
+                assert asset["type"] == "table"
+                table = next(
+                    row for row in state["table"].values() if row["id"] == asset["id"]
+                )
+                assert table["domains"]
+                table.setdefault("dataProducts", []).append(
+                    ref("dataProduct", product["id"])
+                )
+            self.send(200, {"status": "success", "numberOfRowsFailed": 0})
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), MigrationHandler) as server:
+        worker = Thread(target=server.serve_forever)
+        worker.start()
+        settings = yaml.safe_load(config.read_text())
+        del settings["source"], settings["migration"]
+        settings["target"]["server_url"] = f"http://127.0.0.1:{server.server_port}/api"
+        config.write_text(yaml.safe_dump(settings))
+        config.with_name(".env").write_text("OM_TARGET_TOKEN=target-token\n")
+        try:
+            yield state, traffic, control
+        finally:
+            server.shutdown()
+            worker.join()
+
+
+def test_import_dry_run_apply_resume_and_validate(
+    migration_package, import_target, capsys
+):
+    state, traffic, _ = import_target
+    command = ["import", "--package", str(migration_package)]
+    assert main(command) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["mode"] == "dry-run"
+    assert result["actions"] == {"create": 11, "reuse": 2}
+    assert all(method == "GET" for method, _, _ in traffic)
+    checkpoint = migration_package.parent / ".out.import-state.ndjson"
+    assert not checkpoint.exists()
+    assert main([*command, "--dry-run"]) == 0
+    assert json.loads(capsys.readouterr().out) == result
+    assert all(method == "GET" for method, _, _ in traffic)
+
+    traffic.clear()
+    assert main([*command, "--apply"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result["writes"] == {"created": 11, "patched": 1, "memberships_added": 1}
+    assert checkpoint.exists()
+    assert len(checkpoint.read_text().splitlines()) == 12
+    assert not checkpoint.with_name(checkpoint.name + ".lock").exists()
+    assert all(row["target_id"].startswith("t-") for row in result["mapping"])
+    table = state["table"]["service.db.schema.selected"]
+    assert table["owners"] == [ref("team", "t-team")]
+    assert table["domains"] == [
+        ref("domain", state["domain"]["A.child.grandchild"]["id"])
+    ]
+    assert {tag["state"] for tag in table["tags"]} == {"Suggested"}
+    assert set(state["table"]) == {"service.db.schema.selected"}
+    assert set(state["domain"]) == {"A", "A.child", "A.child.grandchild"}
+    assert any(
+        method == "PUT" and route == "dataProducts/product/assets/add"
+        for method, route, _ in traffic
+    )
+
+    traffic.clear()
+    assert main([*command, "--apply"]) == 0
+    assert json.loads(capsys.readouterr().out)["writes"] == {}
+    assert all(method == "GET" for method, _, _ in traffic)
+    assert main(["validate", "--package", str(migration_package)]) == 0
+    assert json.loads(capsys.readouterr().out)["valid"] is True
+    table["domains"] = []
+    assert main(["validate", "--package", str(migration_package)]) == 1
+    assert json.loads(capsys.readouterr().out)["mismatches"] == [
+        {"kind": "table", "fqn": "service.db.schema.selected", "fields": ["domains"]}
+    ]
+    assert all(method == "GET" for method, _, _ in traffic)
+
+
+def test_import_recovers_from_partial_apply_and_handles_conflicts(
+    migration_package, import_target, capsys
+):
+    state, traffic, control = import_target
+    command = ["import", "--package", str(migration_package), "--apply"]
+    control["reject"] = "table"
+    assert main(command) == 1
+    result = capsys.readouterr()
+    assert "HTTP 500" in result.err
+    assert "DO_NOT_SHOW" not in result.err
+    assert state["databaseSchema"] and not state["table"]
+    control["reject"] = None
+    assert main(command) == 0
+    assert json.loads(capsys.readouterr().out)["writes"]["created"] == 1
+
+    checkpoint = migration_package.parent / ".out.import-state.ndjson"
+    checkpoint.unlink()
+    table = state["table"]["service.db.schema.selected"]
+    table["columns"][0]["description"] = "Keep target column documentation."
+    table["columns"][0]["dataType"] = "INT"
+    traffic.clear()
+    assert main(command) == 1
+    assert "Existing target entities" in capsys.readouterr().err
+    assert main([*command, "--on-conflict", "skip"]) == 0
+    assert json.loads(capsys.readouterr().out)["writes"] == {}
+    assert all(method == "GET" for method, _, _ in traffic)
+    assert main([*command, "--on-conflict", "update"]) == 0
+    assert json.loads(capsys.readouterr().out)["writes"] == {"patched": 1}
+    assert table["columns"] == [
+        {
+            "name": "customer_id",
+            "dataType": "BIGINT",
+            "description": "Keep target column documentation.",
+        }
+    ]
+
+
+def test_import_rejects_wrong_version_and_tampered_package_before_writes(
+    migration_package, import_target, capsys
+):
+    state, traffic, control = import_target
+    command = ["import", "--apply", "--package", str(migration_package)]
+    control["version"] = "2.0.0"
+    assert main(command) == 1
+    assert "exactly the package's OpenMetadata version" in capsys.readouterr().err
+    assert [entry[:2] for entry in traffic] == [("GET", "system/version")]
+
+    traffic.clear()
+    control["version"] = "2.0.8"
+    del state["databaseService"]["service"]
+    assert main(command) == 1
+    assert "Missing target prerequisites: databaseService" in capsys.readouterr().err
+    assert all(method == "GET" for method, _, _ in traffic)
+
+    traffic.clear()
+    table_file = migration_package / "table.ndjson"
+    table_file.write_bytes(table_file.read_bytes() + b"{}\n")
+    assert main(command) == 1
+    assert "SHA-256 mismatch" in capsys.readouterr().err
+    assert not traffic
