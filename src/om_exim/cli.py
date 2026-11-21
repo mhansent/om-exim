@@ -3,11 +3,13 @@
 import argparse
 import json
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 import requests
 
-from .client import BASELINE_SDK, ReadClient, ReadError, preflight
+from .audit import AuditError, import_audit
+from .client import BASELINE_SDK, ReadClient, ReadError, RequestPacer, preflight
 from .exporter import ExportError, export_package, format_summary
 from .importer import MigrationImportError, import_package, validate_target
 from .package import PackageError, load_package
@@ -43,26 +45,43 @@ def main(argv: list[str] | None = None) -> int:
             settings = load_settings(
                 args.config, require_selection=False, require_source=False
             )
-            with requests.Session() as target_session:
-                target = TargetClient(settings.target, "Target", target_session)
+            checkpoint = None
+            audit_context = nullcontext()
+            if args.command == "import":
+                package_directory = args.package.resolve()
+                checkpoint = args.checkpoint or (
+                    package_directory.parent
+                    / f".{package_directory.name}.import-state.ndjson"
+                )
+                policy = args.on_conflict or settings.on_conflict
+                audit_context = import_audit(
+                    settings.audit_file,
+                    package=package_directory,
+                    checkpoint=checkpoint,
+                    apply=args.apply,
+                    policy=policy,
+                )
+            with audit_context as audit, requests.Session() as target_session:
+                target = TargetClient(
+                    settings.target,
+                    "Target",
+                    target_session,
+                    pacer=RequestPacer(settings.http),
+                )
                 if target.version() != package.version:
                     raise MigrationImportError(
                         "The target server must report exactly the package's OpenMetadata version."
                     )
-                if args.command == "import":
-                    package_directory = args.package.resolve()
-                    checkpoint = args.checkpoint or (
-                        package_directory.parent
-                        / f".{package_directory.name}.import-state.ndjson"
-                    )
+                if checkpoint is not None:
                     result = import_package(
                         target,
                         package,
                         checkpoint,
-                        policy=args.on_conflict or settings.on_conflict,
+                        policy=policy,
                         apply=args.apply,
                         create_users=settings.create_users,
                         user_emails=settings.user_emails,
+                        audit=audit,
                     )
                 else:
                     result = validate_target(target, package)
@@ -78,8 +97,9 @@ def main(argv: list[str] | None = None) -> int:
             print(f"om-exim: {DOMAIN_DISCOVERY_WARNING}", file=sys.stderr)
         with requests.Session() as source_session, requests.Session() as target_session:
             assert settings.source is not None
-            source = ReadClient(settings.source, "Source", source_session)
-            target = ReadClient(settings.target, "Target", target_session)
+            pacer = RequestPacer(settings.http)
+            source = ReadClient(settings.source, "Source", source_session, pacer=pacer)
+            target = ReadClient(settings.target, "Target", target_session, pacer=pacer)
             if progress:
                 progress("Checking source and target OpenMetadata versions.")
             version = preflight(source, target)
@@ -107,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         ExportError,
         PackageError,
         MigrationImportError,
+        AuditError,
     ) as error:
         print(f"om-exim: {error}", file=sys.stderr)
         return 1

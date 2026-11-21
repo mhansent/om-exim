@@ -19,7 +19,12 @@ migration:
   # table_batch_size: 2500  # Defaults to batch_size when omitted.
 plan:
   show_progress: true
+http:
+  timeout_seconds: 30
+  read_retries: 2
+  requests_per_second: 0  # Zero disables request pacing.
 import:
   on_conflict: update
   create_users: true
   user_emails: {}  # Optional target email by user FQN.
+  # audit_file: ./migration.import-audit.ndjson

@@ -16,3 +16,4 @@ migration_output/
 /config.yaml
 .*.import-state.ndjson
 .*.import-state.ndjson.lock
+*.import-audit.ndjson

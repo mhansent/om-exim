@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from .access import TEAM_FIELDS, TEAM_TYPES, policy_rules
+from .audit import ImportAudit
 from .client import Document, ReadClient
 from .package import Key, Package
 from .registry import REGISTRY
@@ -552,6 +554,8 @@ def _initialize_checkpoint(path: Path, identity: Document) -> None:
         ) as stream:
             temporary = Path(stream.name)
             stream.write(json.dumps(identity) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
         temporary.replace(path)
     except OSError:
         raise MigrationImportError(
@@ -582,6 +586,8 @@ def _append_checkpoint(path: Path, key: Key, target_id: str) -> None:
     try:
         with path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps([*key, target_id]) + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
     except OSError:
         raise MigrationImportError(
             "Unable to save the created entity in the checkpoint. Review the target before retrying."
@@ -605,6 +611,7 @@ def import_package(
     apply: bool,
     create_users: bool,
     user_emails: dict[str, str],
+    audit: ImportAudit | None = None,
 ) -> Document:
     identity = _checkpoint_identity(target, package)
     if not apply:
@@ -616,6 +623,8 @@ def import_package(
             create_users=create_users,
             user_emails=user_emails,
         )
+        if audit:
+            audit.record("preflight_passed", entities=len(operations))
         return {
             "mode": "dry-run",
             "actions": dict(
@@ -650,6 +659,8 @@ def import_package(
             create_users=create_users,
             user_emails=user_emails,
         )
+        if audit:
+            audit.record("preflight_passed", entities=len(operations))
         if not checkpoint.exists():
             _initialize_checkpoint(checkpoint, identity)
         mapped: dict[Key, str] = {}
@@ -670,6 +681,8 @@ def import_package(
                 current = target.create(key[0], body)
                 entity_id = _identity(key, package.entities[key]["fqn"], current)
                 _append_checkpoint(checkpoint, key, entity_id)
+                if audit:
+                    audit.record("target_created", kind=key[0])
                 written["created"] += 1
             if current is not None:
                 mapped[key] = current["id"]
@@ -703,6 +716,8 @@ def import_package(
                         "A target update returned an unexpected identity."
                     )
                 written["patched"] += 1
+                if audit:
+                    audit.record("target_patched", kind=key[0])
         for operation in operations:
             key = operation.key
             assets = package.links.get(key, {}).get("assets", ())
@@ -713,12 +728,11 @@ def import_package(
                     if mapped[key] not in direct_products[asset]
                 ]
                 for offset in range(0, len(additions), 1000):
-                    target.add_product_assets(
-                        package.entities[key]["fqn"], additions[offset : offset + 1000]
-                    )
-                    written["memberships_added"] += len(
-                        additions[offset : offset + 1000]
-                    )
+                    batch = additions[offset : offset + 1000]
+                    target.add_product_assets(package.entities[key]["fqn"], batch)
+                    written["memberships_added"] += len(batch)
+                    if audit:
+                        audit.record("product_memberships_added", count=len(batch))
         return {
             "mode": "apply",
             "actions": dict(

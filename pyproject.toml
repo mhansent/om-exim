@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "om-exim"
 version = "0.1.0"
-description = "Read-only selective OpenMetadata migration planning and export"
+description = "Selective OpenMetadata migration with dry-run and validation"
 readme = "README.md"
 requires-python = ">=3.12,<3.15"
 dependencies = [
@@ -24,6 +24,7 @@ om-exim = "om_exim.cli:main"
 [tool.pytest.ini_options]
 addopts = "-p no:pytest_openmetadata"
 testpaths = ["tests"]
+markers = ["openmetadata_integration: opt-in tests against two disposable OpenMetadata servers"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "UP"]
