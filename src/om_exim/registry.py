@@ -21,7 +21,9 @@ class EntitySpec:
 OWNER = Relationship("owners", ("team", "user"))
 REGISTRY = {
     "domain": EntitySpec(
-        "domains", ("owners", "tags"), (Relationship("parent", ("domain",)), OWNER)
+        "domains",
+        ("parent", "owners", "tags"),
+        (Relationship("parent", ("domain",)), OWNER),
     ),
     "table": EntitySpec(
         "tables",
