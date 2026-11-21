@@ -310,10 +310,11 @@ def test_plan_falls_back_when_table_list_omits_projected_fields(config, api, cap
 
 
 @pytest.mark.parametrize(
-    "batch_size, schema_pages, database_pages", [(100, 21, 4), (1000, 3, 1)]
+    "command, batch_size, schema_pages, database_pages",
+    [("plan", 100, 21, 4), ("plan", 1000, 3, 1), ("export", 1000, 3, 1)],
 )
-def test_plan_batches_large_table_and_dependency_collections(
-    config, api, capsys, batch_size, schema_pages, database_pages
+def test_batches_large_table_and_dependency_collections(
+    config, api, capsys, command, batch_size, schema_pages, database_pages
 ):
     _, routes, _, calls = api
     config.write_text(
@@ -344,12 +345,20 @@ def test_plan_batches_large_table_and_dependency_collections(
             databaseSchema=ref("databaseSchema", f"schema-{i % 2040}"),
             database=schemas[f"schema-{i % 2040}"]["database"],
             service=service,
+            columns=[{"name": "record_id", "dataType": "BIGINT"}] if i >= 500 else None,
         )
         for i in range(10_000)
     }
-    assert main(["plan"]) == 0
+    assert main([command]) == 0
     captured = capsys.readouterr()
-    counts = json.loads(captured.out)["counts"]
+    if command == "export":
+        manifest = json.loads((config.parent / "out/manifest.json").read_text())
+        counts = manifest["counts_by_role"]
+        assert "Writing and hashing export files..." in captured.err
+        assert "9,500" in captured.out
+    else:
+        counts = json.loads(captured.out)["counts"]
+        assert captured.err.endswith("om-exim: Plan complete.\n")
     assert "Checking source and target OpenMetadata versions." in captured.err
     assert "Scanning domains..." in captured.err
     assert [
@@ -366,13 +375,15 @@ def test_plan_batches_large_table_and_dependency_collections(
     ]
     assert "Reading databaseSchemas in bulk..." in captured.err
     assert "Resolving dependencies and references..." in captured.err
-    assert captured.err.endswith("om-exim: Plan complete.\n")
     assert "-token" not in captured.err
     assert counts["primary"]["table"] == 9500
     assert counts["required_dependency"]["databaseSchema"] == 2040
     assert counts["required_dependency"]["database"] == 344
     paths = [path for _, _, path, _ in calls]
     assert paths.count("tables") == 10_000 // batch_size
+    assert {
+        tuple(params["fields"]) for _, _, path, params in calls if path == "tables"
+    } == {("domains,owners,tags",)}
     assert paths.count("databaseSchemas") == schema_pages
     assert paths.count("databases") == database_pages
     assert [path for path in paths if path.startswith("databaseSchemas/")] == [
@@ -393,6 +404,7 @@ def test_export_publishes_deterministic_package_and_summary(config, api, capsys)
     _, routes, _, calls = api
     for table in routes["tables"].values():
         table["columns"] = []
+        table["_omit_from_listing"] = ["columns"]
     routes["tables"]["selected"].update(
         name="Customers",
         tableType="Regular",
@@ -463,7 +475,7 @@ def test_export_publishes_deterministic_package_and_summary(config, api, capsys)
         "GET",
         "source",
         "tables/selected",
-        {"fields": ["domains,owners,tags,columns"]},
+        {"fields": ["domains,columns"]},
     ) in calls
     assert not any(
         path in {"tables/unrelated", "tables/inherited"} for _, _, path, _ in calls
