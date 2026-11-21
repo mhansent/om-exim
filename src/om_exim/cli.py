@@ -61,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
                         checkpoint,
                         policy=args.on_conflict or settings.on_conflict,
                         apply=args.apply,
+                        create_users=settings.create_users,
+                        user_emails=settings.user_emails,
                     )
                 else:
                     result = validate_target(target, package)

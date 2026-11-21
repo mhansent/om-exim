@@ -63,7 +63,7 @@ Export uses the table columns already present in paginated REST responses. When 
 
 The package contains one UTF-8 NDJSON file per exported entity type. Each row records the source identity, role, and allowlisted structural metadata, including table columns. `manifest.json` records the package schema version, UTC creation time, OpenMetadata version, selection rules, counts, planned relationships, references to review, and SHA-256 hashes of the NDJSON files. Rows and checksums are deterministic for the same source metadata. The creation time reflects the current run.
 
-The exporter uses the active entity scope and omits free-text descriptions, service connection settings, user contact fields, profiles, sample data, column tags, and unregistered relationships. Identifiers and ownership relationships can still contain sensitive information. Store the package privately.
+The exporter uses the active entity scope and omits free-text descriptions, service connection settings, most user contact fields, profiles, sample data, column tags, and unregistered relationships. Identifiers and ownership relationships can still contain sensitive information. Store the package privately.
 
 ## Import and validate a package
 
@@ -79,11 +79,25 @@ Import and validation use the target only. The target must report the same exact
 
 Control conflicts through `import.on_conflict` or override it with `--on-conflict fail|skip|update`.
 
-- `fail` is the default. Existing writable entities stop preflight before any writes.
+- `update` is the default. It updates supported fields and restores planned relationships while preserving target-only columns and entity descriptions. PATCH sends `If-Match` when OpenMetadata provides an ETag.
 - `skip` reuses existing entities and leaves their metadata in place. They can serve as relationship targets.
-- `update` changes exported type and column fields and adds planned relationships. It preserves target-only columns, descriptions, and existing direct relationships. PATCH sends `If-Match` when OpenMetadata provides an ETag.
+- `fail` stops preflight if a writable entity already exists.
 
-Database services, teams, and users must already exist by exact FQN on the target. New domains, data products, classifications, tags, glossaries, and glossary terms receive a standard description indicating that the source description was omitted. Imported tag labels are added as suggested labels because the package contains no original approval state. External and unresolved references remain in the manifest for review. A missing required structural dependency blocks import.
+### Bootstrap missing dependencies
+
+```yaml
+import:
+  on_conflict: update
+  create_users: true
+  user_emails:
+    example-user: example-user@example.com
+```
+
+- **Users.** New regular accounts are created through the OpenMetadata API by default. Supply target email addresses by exact user FQN in `import.user_emails`, or set `migration.include_user_emails: true` before exporting. The local mapping takes precedence and can be used with older packages. By default, email addresses stay out of the export. Bot accounts must already exist. Passwords, tokens, admin status, and individually assigned roles stay on the source. On targets with native authentication and SMTP enabled, user creation can send an invitation. Set `create_users: false` to require existing users.
+- **Database services.** Missing services are created with the exported name and service type. Configure database connections separately on the target. Existing connection settings are preserved.
+- **Teams.** Re-export to include team ancestors, direct default roles, direct policies, rule definitions, and memberships for users already in the migration scope. Import creates missing ordinary teams, roles, and policies. It reuses the target Organization root and matching protected roles and policies. Related users are added to their packaged Group teams. Other users and memberships are preserved. Updating a shared role or policy can affect other teams that reference it. Review rule conditions against target names before applying. Location-scoped policies require separate handling.
+
+New domains, data products, classifications, tags, glossaries, and glossary terms receive a standard description indicating that the source description was omitted. Imported labels are suggested because the package does not carry approval state. The manifest records external and unresolved references. Missing structural and team permission dependencies block import.
 
 Apply records confirmed creations in a local checkpoint next to the package, such as `.out.import-state.ndjson`. Repeat with the same package and checkpoint to resume and reconcile relationships. Use `--checkpoint PATH` to choose another location. If a request fails after the target commits but before the creation is recorded, review that entity on the target before explicitly reusing it with `skip` or `update`. Keep the checkpoint with the package and remove a leftover lock only after confirming no import is running.
 

@@ -29,6 +29,7 @@ class Selection:
     include_dependencies: bool = True
     table_batch_size: int | None = None
     discovery: str = "full_scan"
+    include_user_emails: bool = False
 
 
 @dataclass(frozen=True)
@@ -38,7 +39,9 @@ class Settings:
     selection: Selection | None
     show_progress: bool = False
     output_dir: Path = Path("out")
-    on_conflict: str = "fail"
+    on_conflict: str = "update"
+    create_users: bool = True
+    user_emails: dict[str, str] = field(default_factory=dict, repr=False)
 
 
 def _mapping(value: object, location: str, keys: set[str]) -> dict:
@@ -91,6 +94,7 @@ def _selection(raw: object) -> Selection:
             "batch_size",
             "table_batch_size",
             "discovery",
+            "include_user_emails",
             "include_subdomains",
             "include_dependencies",
             "primary_relationship",
@@ -131,6 +135,9 @@ def _selection(raw: object) -> Selection:
     discovery = settings.get("discovery", "full_scan")
     if discovery not in ("full_scan", "domain"):
         raise ConfigError("migration.discovery must be full_scan or domain.")
+    include_user_emails = settings.get("include_user_emails", False)
+    if type(include_user_emails) is not bool:
+        raise ConfigError("migration.include_user_emails must be a boolean.")
     subdomains = settings.get("include_subdomains", True)
     dependencies = settings.get("include_dependencies", True)
     if type(subdomains) is not bool or type(dependencies) is not bool:
@@ -142,6 +149,7 @@ def _selection(raw: object) -> Selection:
         include_dependencies=dependencies,
         table_batch_size=table_size,
         discovery=discovery,
+        include_user_emails=include_user_emails,
     )
 
 
@@ -177,10 +185,25 @@ def load_settings(
         or "\x00" in output_dir
     ):
         raise ConfigError("migration.output_dir must be a non-empty path.")
-    import_config = _mapping(config.get("import", {}), "import", {"on_conflict"})
-    on_conflict = import_config.get("on_conflict", "fail")
+    import_config = _mapping(
+        config.get("import", {}),
+        "import",
+        {"on_conflict", "create_users", "user_emails"},
+    )
+    on_conflict = import_config.get("on_conflict", "update")
     if on_conflict not in ("fail", "skip", "update"):
         raise ConfigError("import.on_conflict must be fail, skip, or update.")
+    create_users = import_config.get("create_users", True)
+    if type(create_users) is not bool:
+        raise ConfigError("import.create_users must be a boolean.")
+    user_emails = import_config.get("user_emails", {})
+    if not isinstance(user_emails, dict) or any(
+        not isinstance(key, str) or not key.strip() or not valid_email(value)
+        for key, value in user_emails.items()
+    ):
+        raise ConfigError(
+            "import.user_emails must map user FQNs to valid email addresses."
+        )
     return Settings(
         _connection("source", config.get("source", {}), values)
         if require_source
@@ -190,4 +213,13 @@ def load_settings(
         show_progress,
         Path(output_dir),
         on_conflict,
+        create_users,
+        user_emails,
+    )
+
+
+def valid_email(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is not None
     )

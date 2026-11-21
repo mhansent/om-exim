@@ -743,7 +743,7 @@ def test_invalid_token_fails_before_any_network_request(
 
 
 @pytest.fixture
-def migration_package(config, api, capsys):
+def migration_package(config, api, capsys, request):
     routes = api[1]
     api[2]["source"] = api[2]["target"] = {"version": "2.0.8"}
     for domain in routes["domains"].values():
@@ -768,6 +768,73 @@ def migration_package(config, api, capsys):
     ):
         for row in routes[route].values():
             row["name"] = row["fullyQualifiedName"].split(".")[-1]
+    scenario = getattr(request, "param", None)
+    if scenario:
+        routes["services/databaseServices"]["service"].update(
+            name="service", serviceType="Postgres"
+        )
+        routes["teams"]["team"].update(
+            name="Analysts",
+            teamType="Group",
+            parents=[ref("team", "division")],
+            defaultRoles=[ref("role", "reader")],
+            policies=[ref("policy", "limited")],
+            users=[ref("user", "owner"), ref("user", "unrelated")],
+        )
+        routes["teams"]["division"] = entity(
+            "division",
+            "Analytics",
+            name="Analytics",
+            teamType="BusinessUnit",
+            parents=[ref("team", "org")],
+        )
+        routes["teams"]["org"] = entity(
+            "org",
+            "Organization",
+            name="Organization",
+            teamType="Organization",
+            policies=[ref("policy", "outside")],
+        )
+        routes["roles"] = {
+            "reader": entity(
+                "reader",
+                "CatalogReader",
+                name="CatalogReader",
+                provider="user",
+                policies=[ref("policy", "limited")],
+            ),
+        }
+        routes["policies"] = {
+            "limited": entity(
+                "limited",
+                "ScopedRead",
+                name="ScopedRead",
+                enabled=True,
+                provider="user",
+                rules=[
+                    {
+                        "name": "read",
+                        "effect": "allow",
+                        "operations": ["ViewBasic"],
+                        "resources": ["table"],
+                        "condition": "isOwner()",
+                        "description": "OMIT ME",
+                    }
+                ],
+            ),
+        }
+        routes["users"]["owner"] = entity(
+            "owner",
+            "account",
+            name="account",
+            email="account@example.com",
+            teams=[ref("team", "team"), ref("team", "outside"), ref("team", "org")],
+        )
+        routes["tables"]["selected"]["owners"].append(ref("user", "owner"))
+        if scenario == "embedded_email":
+            settings = yaml.safe_load(config.read_text())
+            settings["migration"]["include_user_emails"] = True
+            config.write_text(yaml.safe_dump(settings))
     assert main(["export"]) == 0
     capsys.readouterr()
     return config.parent / "out"
@@ -784,6 +851,8 @@ def import_target(config, migration_package):
         "services/databaseServices": "databaseService",
         "teams": "team",
         "users": "user",
+        "roles": "role",
+        "policies": "policy",
         "tags": "tag",
         "classifications": "classification",
         "glossaries": "glossary",
@@ -873,6 +942,28 @@ def import_target(config, migration_package):
                     ref("domain", state["domain"][domain]["id"])
                     for domain in body["domains"]
                 ]
+            if kind == "role":
+                current["policies"] = [
+                    ref("policy", state["policy"][name]["id"])
+                    for name in body["policies"]
+                ]
+            if kind == "team":
+                for field, dependency in {
+                    "parents": "team",
+                    "defaultRoles": "role",
+                    "policies": "policy",
+                }.items():
+                    current[field] = [
+                        ref(
+                            dependency,
+                            next(
+                                item["id"]
+                                for item in state[dependency].values()
+                                if item["id"] == value
+                            ),
+                        )
+                        for value in body.get(field, ())
+                    ]
             fqn = f"{prefix}.{body['name']}" if prefix else body["name"]
             if fqn in state[kind]:
                 self.send(409, {})
@@ -948,7 +1039,7 @@ def test_import_dry_run_apply_resume_and_validate(
     assert main(command) == 0
     result = json.loads(capsys.readouterr().out)
     assert result["mode"] == "dry-run"
-    assert result["actions"] == {"create": 11, "reuse": 2}
+    assert result["actions"] == {"create": 11, "update": 2}
     assert all(method == "GET" for method, _, _ in traffic)
     checkpoint = migration_package.parent / ".out.import-state.ndjson"
     assert not checkpoint.exists()
@@ -1012,12 +1103,12 @@ def test_import_recovers_from_partial_apply_and_handles_conflicts(
     table["columns"][0]["description"] = "Keep target column documentation."
     table["columns"][0]["dataType"] = "INT"
     traffic.clear()
-    assert main(command) == 1
+    assert main([*command, "--on-conflict", "fail"]) == 1
     assert "Existing target entities" in capsys.readouterr().err
     assert main([*command, "--on-conflict", "skip"]) == 0
     assert json.loads(capsys.readouterr().out)["writes"] == {}
     assert all(method == "GET" for method, _, _ in traffic)
-    assert main([*command, "--on-conflict", "update"]) == 0
+    assert main(command) == 0
     assert json.loads(capsys.readouterr().out)["writes"] == {"patched": 1}
     assert table["columns"] == [
         {
@@ -1042,7 +1133,7 @@ def test_import_rejects_wrong_version_and_tampered_package_before_writes(
     control["version"] = "2.0.8"
     del state["databaseService"]["service"]
     assert main(command) == 1
-    assert "Missing target prerequisites: databaseService" in capsys.readouterr().err
+    assert "missing serviceType for a new database service" in capsys.readouterr().err
     assert all(method == "GET" for method, _, _ in traffic)
 
     traffic.clear()
@@ -1051,3 +1142,96 @@ def test_import_rejects_wrong_version_and_tampered_package_before_writes(
     assert main(command) == 1
     assert "SHA-256 mismatch" in capsys.readouterr().err
     assert not traffic
+
+
+@pytest.mark.parametrize(
+    "migration_package", ["mapped_email", "embedded_email"], indirect=True
+)
+def test_import_creates_missing_services_users_and_team_permissions(
+    config, api, migration_package, import_target, capsys
+):
+    state, traffic, _ = import_target
+    state["databaseService"].clear()
+    state["team"].clear()
+    state["team"]["Organization"] = entity(
+        "target-org",
+        "Organization",
+        teamType="Organization",
+        policies=[ref("policy", "target-org-policy")],
+    )
+    state["user"]["unrelated"] = entity("target-unrelated", "unrelated", teams=[])
+    command = ["import", "--package", str(migration_package)]
+    rows = (migration_package / "user.ndjson").read_text()
+    embedded = "account@example.com" in rows
+    manifest = json.loads((migration_package / "manifest.json").read_text())
+    assert manifest["selection"]["include_user_emails"] == embedded
+    assert "unrelated" not in rows
+    assert "OMIT ME" not in (migration_package / "policy.ndjson").read_text()
+    assert "REDACT_ME" not in (migration_package / "databaseService.ndjson").read_text()
+    assert not any(
+        route in {"users/unrelated", "teams/outside", "policies/outside"}
+        for _, _, route, _ in api[3]
+    )
+
+    if not embedded:
+        assert main([*command, "--apply"]) == 1
+        assert "Set import.user_emails" in capsys.readouterr().err
+        assert all(method == "GET" for method, _, _ in traffic)
+        settings = yaml.safe_load(config.read_text())
+        settings["import"] = {"user_emails": {"account": "account@example.com"}}
+        config.write_text(yaml.safe_dump(settings))
+
+    settings = yaml.safe_load(config.read_text())
+    settings.setdefault("import", {})["create_users"] = False
+    config.write_text(yaml.safe_dump(settings))
+    assert main([*command, "--apply"]) == 1
+    assert "Missing target prerequisites: user" in capsys.readouterr().err
+    assert all(method == "GET" for method, _, _ in traffic)
+    del settings["import"]["create_users"]
+    config.write_text(yaml.safe_dump(settings))
+
+    assert main(command) == 0
+    assert all(method == "GET" for method, _, _ in traffic)
+    assert "account@example.com" not in capsys.readouterr().out
+    assert main([*command, "--apply"]) == 0
+    assert "account@example.com" not in capsys.readouterr().out
+    posts = {
+        (route, body["name"]): body
+        for method, route, body in traffic
+        if method == "POST"
+    }
+    assert posts["services/databaseServices", "service"] == {
+        "name": "service",
+        "serviceType": "Postgres",
+    }
+    assert posts["users", "account"] == {
+        "name": "account",
+        "email": "account@example.com",
+        "isAdmin": False,
+        "isBot": False,
+        "createPasswordType": "USER_CREATE",
+    }
+    organization = state["team"]["Organization"]
+    analytics = state["team"]["Analytics"]
+    analysts = state["team"]["Analysts"]
+    reader = state["role"]["CatalogReader"]
+    policy = state["policy"]["ScopedRead"]
+    assert organization["policies"] == [ref("policy", "target-org-policy")]
+    assert analytics["parents"] == [ref("team", "target-org")]
+    assert analysts["parents"] == [ref("team", analytics["id"])]
+    assert analysts["defaultRoles"] == [ref("role", reader["id"])]
+    assert analysts["policies"] == reader["policies"] == [ref("policy", policy["id"])]
+    assert policy["rules"][0]["condition"] == "isOwner()"
+    assert state["user"]["account"]["teams"] == [ref("team", analysts["id"])]
+    assert state["user"]["unrelated"]["teams"] == []
+    assert main(["validate", "--package", str(migration_package)]) == 0
+    assert json.loads(capsys.readouterr().out)["valid"]
+
+    analysts["defaultRoles"] = []
+    policy["rules"][0].update(effect="deny", description="Keep target notes.")
+    traffic.clear()
+    assert main([*command, "--apply"]) == 0
+    assert json.loads(capsys.readouterr().out)["writes"] == {"patched": 2}
+    assert analysts["defaultRoles"] == [ref("role", reader["id"])]
+    assert policy["rules"][0]["effect"] == "allow"
+    assert policy["rules"][0]["description"] == "Keep target notes."
