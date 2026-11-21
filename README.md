@@ -101,6 +101,36 @@ New domains, data products, classifications, tags, glossaries, and glossary term
 
 Apply records confirmed creations in a local checkpoint next to the package, such as `.out.import-state.ndjson`. Repeat with the same package and checkpoint to resume and reconcile relationships. Use `--checkpoint PATH` to choose another location. If a request fails after the target commits but before the creation is recorded, review that entity on the target before explicitly reusing it with `skip` or `update`. Keep the checkpoint with the package and remove a leftover lock only after confirming no import is running.
 
+## Reliability and audit
+
+```yaml
+http:
+  timeout_seconds: 30
+  read_retries: 2
+  requests_per_second: 0
+import:
+  audit_file: ./migration.import-audit.ndjson
+```
+
+The HTTP timeout is per connect or read operation. GET requests retry transient connection failures and HTTP 408, 429, 500, 502, 503, and 504. Backoff starts at 0.5 seconds and is capped at 8 seconds. A server-requested `Retry-After` takes precedence when it is longer than the backoff. Cooldowns above 30 seconds stop the operation so it can be retried later. Set `read_retries: 0` to disable retries. TLS and authorization failures are reported immediately.
+
+Set `requests_per_second` to a positive rate to space all requests in a CLI run, including retries, across source and target. The default of zero disables pacing. The CLI sends write requests once. If a write times out or the target returns an ambiguous failure, inspect the target and resume with the same checkpoint. Confirmed creations are flushed to the checkpoint before additional writes. A truncated checkpoint stops the next run so the recorded IDs can be checked against the target.
+
+The optional private NDJSON audit file appends a run ID, timestamps, preflight results, confirmed write events, and success or failure for each import attempt. It omits URLs, tokens, entity identifiers, and API payloads. Dry-run can write the configured local audit while it continues to make only GET requests to the target. Keep the audit outside the package and separate from the checkpoint.
+
+## Disposable OpenMetadata integration
+
+The opt-in test seeds a source server, exports a small catalog with scoped owners and team permissions, checks that dry-run leaves the target empty, applies the package, validates the restored assets, and checks that a repeat apply makes no writes. It compares indexed discovery with a full scan after the source index reflects the seeded catalog.
+
+Start two isolated deployments of the same stable OpenMetadata 2.0.x patch, preferably 2.0.8. Give each deployment its own database and search index. With Docker Compose, use different project names, volumes, and loopback API ports. Obtain API tokens for the disposable deployments and set the four environment variables below. The test accepts distinct loopback ports and creates temporary test entities in both servers, so discard the deployments afterward. [OpenMetadata 2.0.8 release](https://github.com/open-metadata/OpenMetadata/releases/tag/2.0.8-release)
+
+```sh
+export OM_EXIM_TEST_SOURCE_URL=http://127.0.0.1:18585/api
+export OM_EXIM_TEST_TARGET_URL=http://127.0.0.1:28585/api
+# Set OM_EXIM_TEST_SOURCE_TOKEN and OM_EXIM_TEST_TARGET_TOKEN in your shell.
+OM_EXIM_RUN_INTEGRATION=1 .venv/bin/python -m pytest -m openmetadata_integration -q
+```
+
 ## Development checks
 
 ```sh
@@ -108,4 +138,4 @@ Apply records confirmed creations in a local checkpoint next to the package, suc
 .venv/bin/ruff check .
 ```
 
-Tests use synthetic metadata and a local REST fixture.
+The default suite uses synthetic metadata and local REST fixtures. GitHub Actions builds and installs the wheel, then runs lint, formatter checks, and the local suite on Python 3.12, 3.13, and 3.14.

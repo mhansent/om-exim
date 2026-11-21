@@ -1,5 +1,6 @@
 """Explicit write operations for the import apply path."""
 
+from math import isfinite
 from urllib.parse import quote
 
 import requests
@@ -22,6 +23,7 @@ class TargetClient(ReadClient):
         )
         if etag:
             headers["If-Match"] = etag
+        self.pacer.wait()
         try:
             response = self.session.request(
                 method,
@@ -29,7 +31,7 @@ class TargetClient(ReadClient):
                 json=payload,
                 headers=headers,
                 auth=self._authenticate,
-                timeout=30,
+                timeout=self.pacer.settings.timeout_seconds,
                 allow_redirects=False,
             )
         except requests.RequestException:
@@ -37,8 +39,14 @@ class TargetClient(ReadClient):
                 f"Target: {method} {route.split('/')[0]} failed. Review target state before retrying."
             ) from None
         if response.status_code not in (200, 201):
+            guidance = (
+                " Review the target and resume from the checkpoint."
+                if response.status_code in {409, 412, 429}
+                or response.status_code >= 500
+                else ""
+            )
             raise ReadError(
-                f"Target: {method} {route.split('/')[0]} returned HTTP {response.status_code}."
+                f"Target: {method} {route.split('/')[0]} returned HTTP {response.status_code}.{guidance}"
             )
         try:
             body = response.json()
@@ -60,7 +68,14 @@ class TargetClient(ReadClient):
         response = self._get_response(route, params, unavailable=(404,))
         if response is None:
             return None, None
-        return self._decode(response), response.headers.get("ETag")
+        entity = self._decode(response)
+        version = entity.get("version")
+        etag = response.headers.get("ETag")
+        # OpenMetadata hashes the GET field projection for its strong ETag.
+        # PATCH uses a different projection and accepts a version-based validator.
+        if type(version) in (int, float) and isfinite(version) and version >= 0:
+            etag = f'W/"{float(version)}"'
+        return entity, etag
 
     def patch(
         self, kind: str, entity_id: str, changes: list[Document], *, etag: str | None

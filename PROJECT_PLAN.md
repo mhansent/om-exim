@@ -123,7 +123,7 @@ Import runs in dry-run mode unless `--apply` is supplied. The exact server versi
 - Secrets never appear in artifacts or logs.
 
 ## Decisions pending verification
-- Compatibility with the deployment target, OpenMetadata Server 2.0.8, remains pending live API verification.
+- The core workflow passed live on OpenMetadata Server 2.0.8. See the [capability matrix](CAPABILITIES.md) for verified and pending coverage.
 - Precise list of entity categories supported in the chosen SDK and how their domain relations are represented.
 - Treatment of referenced assets outside selected domains: default preserve as external references/report, not migrate automatically.
 - Database service import creates metadata from the exported name and service type. Connection configuration and credentials are managed on the target.

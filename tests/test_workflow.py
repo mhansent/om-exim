@@ -873,6 +873,7 @@ def import_target(config, migration_package):
             self.send_header("Content-Type", "application/json")
             if "id" in payload:
                 self.send_header("ETag", '"fixture-etag"')
+                payload = {**payload, "version": 0.1}
             self.end_headers()
             self.wfile.write(json.dumps(payload).encode())
 
@@ -977,7 +978,7 @@ def import_target(config, migration_package):
             changes = self.body()
             traffic.append(("PATCH", route, changes))
             assert self.headers["Content-Type"] == "application/json-patch+json"
-            assert self.headers["If-Match"] == '"fixture-etag"'
+            assert self.headers["If-Match"] == 'W/"0.1"'
             kind, identifier = self.address(route)
             current = next(
                 item for item in state[kind].values() if item["id"] == identifier
@@ -1235,3 +1236,43 @@ def test_import_creates_missing_services_users_and_team_permissions(
     assert analysts["defaultRoles"] == [ref("role", reader["id"])]
     assert policy["rules"][0]["effect"] == "allow"
     assert policy["rules"][0]["description"] == "Keep target notes."
+
+
+def test_import_audit_logs_outcomes_without_payloads_or_credentials(
+    config, migration_package, import_target, capsys
+):
+    _, traffic, control = import_target
+    path = config.parent / "migration.import-audit.ndjson"
+    settings = yaml.safe_load(config.read_text())
+    settings["import"] = {"audit_file": str(path)}
+    config.write_text(yaml.safe_dump(settings))
+    command = ["import", "--package", str(migration_package)]
+
+    assert main(command) == 0
+    capsys.readouterr()
+    assert main([*command, "--apply"]) == 0
+    capsys.readouterr()
+    control["version"] = "2.0.0"
+    traffic.clear()
+    assert main([*command, "--apply"]) == 1
+    assert all(method == "GET" for method, _, _ in traffic)
+
+    raw = path.read_text()
+    log = [json.loads(line) for line in raw.splitlines()]
+    starts = [entry for entry in log if entry["event"] == "import_started"]
+    assert [entry["mode"] for entry in starts] == ["dry-run", "apply", "apply"]
+    assert len({entry["run_id"] for entry in starts}) == 3
+    assert sum(entry["event"] == "target_created" for entry in log) == 11
+    assert sum(entry["event"] == "import_completed" for entry in log) == 2
+    assert log[-1]["event"] == "import_failed"
+    assert "target-token" not in raw
+    assert "http://" not in raw
+    assert "fullyQualifiedName" not in raw
+    assert "service.db.schema.selected" not in raw
+
+    settings["import"]["audit_file"] = str(migration_package / "manifest.json")
+    config.write_text(yaml.safe_dump(settings))
+    traffic.clear()
+    assert main(command) == 1
+    assert "audit must be separate" in capsys.readouterr().err
+    assert not traffic

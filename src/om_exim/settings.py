@@ -4,6 +4,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -33,6 +34,13 @@ class Selection:
 
 
 @dataclass(frozen=True)
+class HttpSettings:
+    timeout_seconds: float = 30
+    read_retries: int = 2
+    requests_per_second: float = 0
+
+
+@dataclass(frozen=True)
 class Settings:
     source: Connection | None
     target: Connection
@@ -42,6 +50,8 @@ class Settings:
     on_conflict: str = "update"
     create_users: bool = True
     user_emails: dict[str, str] = field(default_factory=dict, repr=False)
+    http: HttpSettings = HttpSettings()
+    audit_file: Path | None = None
 
 
 def _mapping(value: object, location: str, keys: set[str]) -> dict:
@@ -170,7 +180,9 @@ def load_settings(
         ) from None
     values.update(os.environ if environ is None else environ)
     config = _mapping(
-        raw, "Configuration", {"source", "target", "migration", "plan", "import"}
+        raw,
+        "Configuration",
+        {"source", "target", "migration", "plan", "import", "http"},
     )
     plan = _mapping(config.get("plan", {}), "plan", {"show_progress"})
     show_progress = plan.get("show_progress", False)
@@ -188,7 +200,7 @@ def load_settings(
     import_config = _mapping(
         config.get("import", {}),
         "import",
-        {"on_conflict", "create_users", "user_emails"},
+        {"on_conflict", "create_users", "user_emails", "audit_file"},
     )
     on_conflict = import_config.get("on_conflict", "update")
     if on_conflict not in ("fail", "skip", "update"):
@@ -204,6 +216,13 @@ def load_settings(
         raise ConfigError(
             "import.user_emails must map user FQNs to valid email addresses."
         )
+    audit_file = import_config.get("audit_file")
+    if audit_file is not None and (
+        not isinstance(audit_file, str)
+        or not audit_file.strip()
+        or "\x00" in audit_file
+    ):
+        raise ConfigError("import.audit_file must be a non-empty path.")
     return Settings(
         _connection("source", config.get("source", {}), values)
         if require_source
@@ -215,6 +234,8 @@ def load_settings(
         on_conflict,
         create_users,
         user_emails,
+        _http_settings(config.get("http", {})),
+        Path(audit_file) if audit_file is not None else None,
     )
 
 
@@ -223,3 +244,30 @@ def valid_email(value: object) -> bool:
         isinstance(value, str)
         and re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value) is not None
     )
+
+
+def _http_settings(raw: object) -> HttpSettings:
+    config = _mapping(
+        raw, "http", {"timeout_seconds", "read_retries", "requests_per_second"}
+    )
+    timeout = config.get("timeout_seconds", 30)
+    retries = config.get("read_retries", 2)
+    rate = config.get("requests_per_second", 0)
+    try:
+        valid_timeout = (
+            type(timeout) in {int, float} and isfinite(timeout) and timeout > 0
+        )
+        valid_rate = type(rate) in {int, float} and (
+            rate == 0 or rate > 0 and isfinite(rate) and isfinite(1 / rate)
+        )
+    except OverflowError:
+        raise ConfigError("HTTP timeout and rate must be finite numbers.") from None
+    if not valid_timeout:
+        raise ConfigError("http.timeout_seconds must be a positive finite number.")
+    if type(retries) is not int or not 0 <= retries <= 10:
+        raise ConfigError("http.read_retries must be an integer from 0 to 10.")
+    if not valid_rate:
+        raise ConfigError(
+            "http.requests_per_second must be zero or a positive finite rate."
+        )
+    return HttpSettings(timeout, retries, rate)

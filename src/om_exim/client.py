@@ -2,15 +2,20 @@
 
 import re
 from collections.abc import Iterator
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from time import monotonic, sleep
 from typing import Any
 from urllib.parse import quote
 
 import requests
 
 from .registry import REGISTRY
-from .settings import Connection
+from .settings import Connection, HttpSettings
 
 BASELINE_SDK = "2.0.0.0"
+RETRY_STATUSES = {408, 429, 500, 502, 503, 504}
+MAX_RETRY_AFTER = 30
 
 Document = dict[str, Any]
 
@@ -19,11 +24,49 @@ class ReadError(ValueError):
     pass
 
 
+class RequestPacer:
+    def __init__(self, settings: HttpSettings):
+        self.settings = settings
+        self._interval = (
+            1 / settings.requests_per_second if settings.requests_per_second else 0
+        )
+        self._next_request = 0.0
+
+    def wait(self) -> None:
+        if self._interval:
+            delay = self._next_request - monotonic()
+            if delay > 0:
+                sleep(delay)
+            self._next_request = monotonic() + self._interval
+
+
+def _retry_after(value: str | None) -> float:
+    if not value:
+        return 0
+    try:
+        if value.isascii() and value.isdigit():
+            return float(value)
+        when = parsedate_to_datetime(value)
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0, (when - datetime.now(UTC)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return 0
+
+
 class ReadClient:
-    def __init__(self, connection: Connection, label: str, session: requests.Session):
+    def __init__(
+        self,
+        connection: Connection,
+        label: str,
+        session: requests.Session,
+        *,
+        pacer: RequestPacer | None = None,
+    ):
         self.connection = connection
         self.label = label
         self.session = session
+        self.pacer = pacer or RequestPacer(HttpSettings())
 
     def _authenticate(
         self, request: requests.PreparedRequest
@@ -48,25 +91,55 @@ class ReadClient:
     def _get_response(
         self, route: str, params: dict | None, *, unavailable: tuple[int, ...]
     ) -> requests.Response | None:
-        try:
-            response = self.session.get(
-                self._url(route),
-                params=params,
-                timeout=30,
-                allow_redirects=False,
-                auth=self._authenticate,
-            )
-        except requests.RequestException:
-            raise ReadError(
-                f"{self.label}: GET {route.split('/')[0]} failed."
-            ) from None
+        response = self._read_with_retry(route, params)
         if response.status_code in unavailable:
             return None
         if response.status_code != 200:
+            guidance = ""
+            if (
+                response.status_code in RETRY_STATUSES
+                and _retry_after(response.headers.get("Retry-After")) > MAX_RETRY_AFTER
+            ):
+                guidance = " The server requested a longer cooldown. Retry after it has elapsed."
             raise ReadError(
-                f"{self.label}: GET {route.split('/')[0]} returned HTTP {response.status_code}."
+                f"{self.label}: GET {route.split('/')[0]} returned HTTP {response.status_code}.{guidance}"
             )
         return response
+
+    def _read_with_retry(self, route: str, params: dict | None) -> requests.Response:
+        settings = self.pacer.settings
+        for attempt in range(settings.read_retries + 1):
+            self.pacer.wait()
+            backoff = min(0.5 * 2**attempt, 8)
+            try:
+                response = self.session.get(
+                    self._url(route),
+                    params=params,
+                    timeout=settings.timeout_seconds,
+                    allow_redirects=False,
+                    auth=self._authenticate,
+                )
+            except requests.RequestException as error:
+                retryable = isinstance(
+                    error, requests.Timeout | requests.ConnectionError
+                ) and not isinstance(error, requests.exceptions.SSLError)
+                if not retryable or attempt == settings.read_retries:
+                    raise ReadError(
+                        f"{self.label}: GET {route.split('/')[0]} failed."
+                    ) from None
+                sleep(backoff)
+                continue
+            if (
+                response.status_code not in RETRY_STATUSES
+                or attempt == settings.read_retries
+            ):
+                return response
+            retry_after = _retry_after(response.headers.get("Retry-After"))
+            if retry_after > MAX_RETRY_AFTER:
+                return response
+            response.close()
+            sleep(max(backoff, retry_after))
+        raise AssertionError("Read retry loop exhausted without a response.")
 
     def _decode(self, response: requests.Response) -> Document:
         try:
