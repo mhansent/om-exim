@@ -7,6 +7,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import yaml
 
+from om_exim import plan as planner
 from om_exim.cli import main
 from om_exim.settings import load_settings
 
@@ -120,8 +121,14 @@ def api():
                 self.send(200, versions[side])
                 return
             assert side == "source"
-            if route == "dataProducts/product/assets":
-                items = [ref("table", "selected"), ref("table", "unrelated")]
+            if route == "dataProducts/product/assets" or (
+                route.startswith("domains/") and route.endswith("/assets")
+            ):
+                if route == "dataProducts/product/assets":
+                    items = [ref("table", "selected"), ref("table", "unrelated")]
+                else:
+                    domain_id = route.split("/")[1]
+                    items = routes["domains"].get(domain_id, {}).get("_assets", [])
                 offset, limit = int(params["offset"][0]), int(params["limit"][0])
                 self.send(
                     200,
@@ -133,6 +140,20 @@ def api():
                 return
             if route in routes:
                 rows = list(routes[route])
+                if route == "dataProducts" and "domain" in params:
+                    domain_ids = {
+                        row["id"]
+                        for row in routes["domains"].values()
+                        if row["fullyQualifiedName"] == params["domain"][0]
+                    }
+                    rows = [
+                        key
+                        for key in rows
+                        if any(
+                            ref["id"] in domain_ids
+                            for ref in routes[route][key]["domains"]
+                        )
+                    ]
                 after = int(params.get("after", ["0"])[0])
                 end = min(after + int(params["limit"][0]), len(rows))
                 data = []
@@ -444,6 +465,88 @@ def test_invalid_progress_setting_fails_before_any_network_request(config, api, 
     assert main(["plan"]) == 1
     assert "plan.show_progress must be a boolean." in capsys.readouterr().err
     assert not api[3]
+
+
+def test_domain_discovery_matches_full_scan_without_catalog_reads(
+    config, api, capsys, monkeypatch
+):
+    _, routes, versions, calls = api
+    versions["source"] = versions["target"] = {"version": "2.0.8"}
+    assert main(["plan"]) == 0
+    full = json.loads(capsys.readouterr().out)
+    calls.clear()
+
+    routes["domains"]["a"]["_assets"] = [
+        ref("table", "inherited"),
+        ref("table", "selected"),
+        ref("topic", "unsupported"),
+    ]
+    routes["domains"]["grandchild"]["_assets"] = [
+        ref("table", "selected"),
+        ref("table", "unrelated"),
+    ]
+    settings = yaml.safe_load(config.read_text())
+    settings["migration"]["discovery"] = "domain"
+    settings["migration"]["table_batch_size"] = 2500
+    config.write_text(yaml.safe_dump(settings))
+    monkeypatch.setattr(planner, "MIN_BULK_DEPENDENCIES", 1)
+    routes["tables"]["selected"]["columns"] = [{"name": "id", "dataType": "BIGINT"}]
+
+    assert main(["plan"]) == 0
+    captured = capsys.readouterr()
+    targeted = json.loads(captured.out)
+    for field in ("entities", "counts", "relationships", "references"):
+        assert targeted[field] == full[field]
+    assert targeted["selection"]["discovery"] == "domain"
+    assert "omit tables" in targeted["warnings"][0]
+    assert "omit tables" in captured.err
+    assert (
+        "GET",
+        "source",
+        "domains/a/assets",
+        {"limit": ["1"], "offset": ["1"]},
+    ) in calls
+    assert {
+        params["domain"][0] for _, _, path, params in calls if path == "dataProducts"
+    } == {
+        "A",
+        "A.child",
+        "A.child.grandchild",
+    }
+    assert [path for _, _, path, _ in calls].count("tables/selected") == 1
+    assert [path for _, _, path, _ in calls].count("databaseSchemas/schema") == 1
+    assert not any(
+        path in {"tables", "databaseSchemas", "databases"} for _, _, path, _ in calls
+    )
+    assert not any(path.startswith("domains/b/") for _, _, path, _ in calls)
+
+    assert main(["export"]) == 0
+    manifest = json.loads((config.parent / "out/manifest.json").read_text())
+    assert manifest["selection"]["discovery"] == "domain"
+    assert manifest["counts_by_role"] == full["counts"]
+    assert targeted["warnings"][0] in manifest["warnings"]
+    assert not any(
+        path in {"tables", "databaseSchemas", "databases"} for _, _, path, _ in calls
+    )
+
+
+def test_domain_discovery_warns_on_empty_index_and_fails_on_stale_candidate(
+    config, api, capsys
+):
+    settings = yaml.safe_load(config.read_text())
+    settings["migration"]["discovery"] = "domain"
+    config.write_text(yaml.safe_dump(settings))
+    assert main(["plan"]) == 0
+    captured = capsys.readouterr()
+    assert "table" not in json.loads(captured.out)["counts"]["primary"]
+    assert "A stale or unavailable index can omit tables" in captured.err
+
+    api[1]["domains"]["a"]["_assets"] = [ref("table", "missing")]
+    assert main(["export"]) == 1
+    captured = capsys.readouterr()
+    assert "candidate is no longer available" in captured.err
+    assert not captured.out
+    assert not (config.parent / "out").exists()
 
 
 def test_export_publishes_deterministic_package_and_summary(config, api, capsys):

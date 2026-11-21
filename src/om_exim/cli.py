@@ -9,7 +9,7 @@ import requests
 
 from .client import BASELINE_SDK, ReadClient, ReadError, preflight
 from .exporter import ExportError, export_package, format_summary
-from .plan import build_plan
+from .plan import DOMAIN_DISCOVERY_WARNING, build_plan
 from .settings import ConfigError, load_settings
 
 
@@ -45,6 +45,8 @@ def main(argv: list[str] | None = None) -> int:
         progress = (
             _print_progress if settings.selection and settings.show_progress else None
         )
+        if settings.selection and settings.selection.discovery == "domain":
+            print(f"om-exim: {DOMAIN_DISCOVERY_WARNING}", file=sys.stderr)
         with requests.Session() as source_session, requests.Session() as target_session:
             source = ReadClient(settings.source, "Source", source_session)
             target = ReadClient(settings.target, "Target", target_session)

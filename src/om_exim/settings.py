@@ -28,6 +28,7 @@ class Selection:
     include_subdomains: bool = True
     include_dependencies: bool = True
     table_batch_size: int | None = None
+    discovery: str = "full_scan"
 
 
 @dataclass(frozen=True)
@@ -88,6 +89,7 @@ def _selection(raw: object) -> Selection:
             "domains",
             "batch_size",
             "table_batch_size",
+            "discovery",
             "include_subdomains",
             "include_dependencies",
             "primary_relationship",
@@ -125,6 +127,9 @@ def _selection(raw: object) -> Selection:
         raise ConfigError(
             "migration.table_batch_size must be an integer from 1 to 1000000."
         )
+    discovery = settings.get("discovery", "full_scan")
+    if discovery not in ("full_scan", "domain"):
+        raise ConfigError("migration.discovery must be full_scan or domain.")
     subdomains = settings.get("include_subdomains", True)
     dependencies = settings.get("include_dependencies", True)
     if type(subdomains) is not bool or type(dependencies) is not bool:
@@ -135,6 +140,7 @@ def _selection(raw: object) -> Selection:
         include_subdomains=subdomains,
         include_dependencies=dependencies,
         table_batch_size=table_size,
+        discovery=discovery,
     )
 
 

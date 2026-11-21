@@ -31,7 +31,22 @@ These commands require the source and target servers to report the same exact st
 
 The planner includes all descendants of the configured domain FQNs by default. They appear alongside the configured roots as `selected_domain` entries in `entities`, with totals under `counts.selected_domain`. The planner also includes supported required dependencies by default. They appear as `required_dependency` entries, with totals under `counts.required_dependency`. Use `migration.include_subdomains` and `migration.include_dependencies` to control these options.
 
-For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` defaults to 100 and accepts 1–1,000. It controls pagination for general reads, including data product membership. Set `migration.table_batch_size` to use a separate page size for table scans in both `plan` and `export`. It accepts 1–1,000,000 and inherits `migration.batch_size` when omitted. Larger table pages reduce requests and increase response size and memory use.
+### Discover assets by domain
+
+For a small selection in a large catalog, set the following option under your existing `migration` settings.
+
+```yaml
+migration:
+  discovery: domain
+```
+
+Both `plan` and `export` resolve the configured domains and their subdomains, then query the selected domains' asset lists for table candidates. Data product listing uses the domain filter. The planner deduplicates candidates, verifies direct assignment from source entity details, and resolves required dependencies by ID or FQN. This mode skips the global table, schema, and database scans. It still reads the domain hierarchy and pages through memberships of selected data products for reference reporting.
+
+Domain asset discovery depends on the OpenMetadata search index. A stale or unavailable index can omit tables, including returning an empty page, so this mode reports a warning on stderr and in the plan or export manifest. Compare the resulting entity IDs against `migration.discovery: full_scan` on your server before relying on the indexed mode for a complete migration. `full_scan` is the default.
+
+### Pagination and progress
+
+In full scan mode, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` defaults to 100 and accepts 1–1,000. It controls pagination for general reads, including data product membership. Set `migration.table_batch_size` to use a separate page size for full table scans in both `plan` and `export`. Domain asset pages use `migration.batch_size`. It accepts 1–1,000,000 and inherits `migration.batch_size` when omitted. Larger table pages reduce requests and increase response size and memory use.
 
 ```yaml
 migration:

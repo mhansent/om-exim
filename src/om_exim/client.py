@@ -95,9 +95,12 @@ class ReadClient:
         project_fields: bool = False,
         optional: bool = False,
         max_pages: int | None = None,
+        domain: str | None = None,
     ) -> Iterator[Document]:
         spec = REGISTRY[kind]
         params: dict[str, str | int] = {"limit": limit}
+        if domain is not None:
+            params["domain"] = domain
         if project_fields and spec.fields:
             params["fields"] = ",".join(spec.fields)
         cursors: set[str] = set()
@@ -148,7 +151,17 @@ class ReadClient:
         return self._get(f"{spec.route}/{path}", params, unavailable=(404,))
 
     def product_members(self, entity_id: str, limit: int) -> Iterator[Document]:
-        route = f"dataProducts/{quote(entity_id, safe='')}/assets"
+        return self._asset_references("dataProducts", entity_id, limit)
+
+    def domain_assets(self, entity_id: str, limit: int) -> Iterator[Document]:
+        return self._asset_references("domains", entity_id, limit)
+
+    def _asset_references(
+        self, collection: str, entity_id: str, limit: int
+    ) -> Iterator[Document]:
+        if entity_id in {".", ".."}:
+            raise ReadError("The API returned an invalid reference identifier.")
+        route = f"{collection}/{quote(entity_id, safe='')}/assets"
         offset = 0
         while True:
             data, paging = self._page(
@@ -156,15 +169,13 @@ class ReadClient:
             )
             total = paging.get("total")
             if type(total) is not int or total < offset + len(data):
-                raise ReadError(
-                    "The data product membership page has an invalid total."
-                )
+                raise ReadError(f"The {collection} asset page has an invalid total.")
             yield from data
             offset += len(data)
             if offset == total:
                 return
             if not data:
-                raise ReadError("The data product membership listing ended early.")
+                raise ReadError(f"The {collection} asset listing ended early.")
 
 
 def preflight(source: ReadClient, target: ReadClient) -> str:
