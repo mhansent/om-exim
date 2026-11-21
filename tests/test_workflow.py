@@ -1,3 +1,4 @@
+import hashlib
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Thread
@@ -386,6 +387,121 @@ def test_invalid_progress_setting_fails_before_any_network_request(config, api, 
     assert main(["plan"]) == 1
     assert "plan.show_progress must be a boolean." in capsys.readouterr().err
     assert not api[3]
+
+
+def test_export_publishes_deterministic_package_and_summary(config, api, capsys):
+    _, routes, _, calls = api
+    for table in routes["tables"].values():
+        table["columns"] = []
+    routes["tables"]["selected"].update(
+        name="Customers",
+        tableType="Regular",
+        columns=[
+            {
+                "name": "customer_id",
+                "dataType": "INT",
+                "description": "DO_NOT_EXPORT",
+                "children": [
+                    {"name": "nested_id", "dataType": "BIGINT", "precision": 8}
+                ],
+            }
+        ],
+        sampleData=["DO_NOT_EXPORT"],
+        _omit_from_listing=["columns"],
+    )
+    routes["dataProducts"]["product"]["name"] = "Finanças"
+    config.write_text(
+        config.read_text().replace(
+            "batch_size: 1", "batch_size: 1\n  output_dir: exports/first"
+        )
+    )
+
+    assert main(["export"]) == 0
+    captured = capsys.readouterr()
+    assert "┃ Entity Type" in captured.out
+    assert "│ Domains" in captured.out
+    assert "│ Total" in captured.out
+    assert not captured.err
+    first = config.parent / "exports/first"
+    manifest = json.loads((first / "manifest.json").read_text())
+    assert manifest["schema_version"] == 1
+    assert manifest["openmetadata_version"] == "2.0.0"
+    assert manifest["created_at"].endswith("+00:00")
+    assert manifest["selection"]["include_deleted"] is False
+    assert manifest["counts"]["table"] == 1
+    assert manifest["counts_by_role"]["selected_domain"]["domain"] == 3
+    assert any(ref["reason"] == "missing_reference" for ref in manifest["references"])
+    assert any(link["field"] == "databaseSchema" for link in manifest["relationships"])
+    assert manifest["warnings"]
+
+    for kind, meta in manifest["files"].items():
+        content = (first / meta["path"]).read_bytes()
+        assert hashlib.sha256(content).hexdigest() == meta["sha256"]
+        assert len(content.splitlines()) == meta["count"] == manifest["counts"][kind]
+        assert b"DO_NOT_EXPORT" not in content
+        assert b"REDACT_ME" not in content
+        assert b"source-token" not in content
+        assert content.endswith(b"\n")
+    assert "Finanças".encode() in (first / "dataProduct.ndjson").read_bytes()
+    table = json.loads((first / "table.ndjson").read_text())
+    assert table["id"] == "selected"
+    assert table["role"] == "primary"
+    assert table["data"] == {
+        "name": "Customers",
+        "tableType": "Regular",
+        "columns": [
+            {
+                "name": "customer_id",
+                "dataType": "INT",
+                "children": [
+                    {"name": "nested_id", "dataType": "BIGINT", "precision": 8}
+                ],
+            }
+        ],
+    }
+    assert (
+        "GET",
+        "source",
+        "tables/selected",
+        {"fields": ["domains,owners,tags,columns"]},
+    ) in calls
+    assert not any(
+        path in {"tables/unrelated", "tables/inherited"} for _, _, path, _ in calls
+    )
+    assert all(
+        method == "GET" and (side == "source" or path == "system/version")
+        for method, side, path, _ in calls
+    )
+
+    saved_manifest = (first / "manifest.json").read_bytes()
+    assert main(["export"]) == 1
+    assert "already exists" in capsys.readouterr().err
+    assert (first / "manifest.json").read_bytes() == saved_manifest
+    config.write_text(config.read_text().replace("exports/first", "exports/second"))
+    assert main(["export"]) == 0
+    second = config.parent / "exports/second"
+    second_manifest = json.loads((second / "manifest.json").read_text())
+    del manifest["created_at"], second_manifest["created_at"]
+    assert manifest == second_manifest
+    assert all(
+        (first / meta["path"]).read_bytes() == (second / meta["path"]).read_bytes()
+        for meta in manifest["files"].values()
+    )
+
+
+def test_export_removes_staging_on_failure(config, api, capsys):
+    routes = api[1]
+    for table in routes["tables"].values():
+        table["columns"] = []
+    routes["tables"]["selected"]["name"] = "source-token"
+
+    assert main(["export"]) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "connection token matched export data" in captured.err
+    assert "source-token" not in captured.err
+    assert not (config.parent / "out").exists()
+    assert not list(config.parent.glob(".om-exim-*"))
 
 
 @pytest.mark.parametrize(

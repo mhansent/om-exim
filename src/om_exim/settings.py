@@ -35,6 +35,7 @@ class Settings:
     target: Connection
     selection: Selection | None
     show_progress: bool = False
+    output_dir: Path = Path("out")
 
 
 def _mapping(value: object, location: str, keys: set[str]) -> dict:
@@ -143,10 +144,19 @@ def load_settings(
     show_progress = plan.get("show_progress", False)
     if type(show_progress) is not bool:
         raise ConfigError("plan.show_progress must be a boolean.")
-    selection = _selection(config.get("migration")) if require_selection else None
+    migration = config.get("migration")
+    selection = _selection(migration) if require_selection else None
+    output_dir = migration.get("output_dir", "out") if selection else "out"
+    if (
+        not isinstance(output_dir, str)
+        or not output_dir.strip()
+        or "\x00" in output_dir
+    ):
+        raise ConfigError("migration.output_dir must be a non-empty path.")
     return Settings(
         _connection("source", config.get("source", {}), values),
         _connection("target", config.get("target", {}), values),
         selection,
         show_progress,
+        Path(output_dir),
     )

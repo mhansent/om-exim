@@ -1,6 +1,6 @@
 # om-exim
 
-Plan selective OpenMetadata migrations between two instances running the same exact server version. The current planner uses read-only REST calls. It selects directly assigned tables and data products from exact domain FQNs and their descendants.
+Plan and export selective OpenMetadata migrations between two instances running the same exact server version. The planner and exporter use read-only REST calls. It selects directly assigned tables and data products from exact domain FQNs and their descendants.
 
 ## Install
 
@@ -22,17 +22,26 @@ The process environment takes precedence over `.env`. Either can override the YA
 ```sh
 .venv/bin/om-exim preflight
 .venv/bin/om-exim plan
+.venv/bin/om-exim export
 ```
 
-Both commands require the source and target servers to report the same exact stable OpenMetadata `2.0.x` version. For example, two `2.0.8` servers pass the version check. The plan is JSON on standard output. It reports selected domains, primary entities, required dependencies, their known relationships, and external, missing, unsupported, or excluded references. Membership in a selected data product does not add an asset to the plan. OpenMetadata permissions can limit the entities visible to the source token.
+These commands require the source and target servers to report the same exact stable OpenMetadata `2.0.x` version. For example, two `2.0.8` servers pass the version check. The plan is JSON on standard output. It reports selected domains, primary entities, required dependencies, their known relationships, and external, missing, unsupported, or excluded references. Membership in a selected data product does not add an asset to the plan. OpenMetadata permissions can limit the entities visible to the source token.
 
-`export`, `import`, and `validate` are reserved for later phases and exit before issuing requests. The example's `migration.output_dir` and `import.on_conflict` document settings for those phases.
+`import` and `validate` are reserved for later phases and exit before issuing requests.
 
 The planner includes all descendants of the configured domain FQNs by default. They appear alongside the configured roots as `selected_domain` entries in `entities`, with totals under `counts.selected_domain`. The planner also includes supported required dependencies by default. They appear as `required_dependency` entries, with totals under `counts.required_dependency`. Use `migration.include_subdomains` and `migration.include_dependencies` to control these options.
 
 For large catalogs, `plan` reads table relationships from paginated REST responses and fetches individual details when the response omits required planning fields. For large sets of required schemas and databases, it also reads their details from paginated collections. Only referenced schemas and databases enter the plan. `migration.batch_size` controls the page size and defaults to 100. Higher values reduce requests and increase the size of each response.
 
 Set `plan.show_progress: true` in `config.yaml` to show the current stage and running counts in the console. Running counts are reported in increments of `migration.batch_size`. The example configuration enables progress. Configurations that omit the setting default to `false`. Progress goes to stderr, so `om-exim plan > plan.json` writes only JSON to the file.
+
+## Export package
+
+Set `migration.output_dir` to a new directory. Relative paths use the current working directory. The default is `./out`. The exporter publishes the directory only after writing all files and refuses to overwrite an existing directory. On success it prints a table of exported entity counts and the number of references to review. `plan.show_progress` also controls the planning and writing progress shown during export.
+
+The package contains one UTF-8 NDJSON file per exported entity type. Each row records the source identity, role, and allowlisted structural metadata, including table columns. `manifest.json` records the package schema version, UTC creation time, OpenMetadata version, selection rules, counts, planned relationships, references to review, and SHA-256 hashes of the NDJSON files. Rows and checksums are deterministic for the same source metadata. The creation time reflects the current run.
+
+The exporter uses the active entity scope and omits free-text descriptions, service connection settings, user contact fields, profiles, sample data, column tags, and unregistered relationships. Identifiers and ownership relationships can still contain sensitive information. Store the package privately.
 
 ## Development checks
 

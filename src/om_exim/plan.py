@@ -91,26 +91,36 @@ def _reference(raw: object, field: str) -> Key:
 
 
 def _details(
-    client: ReadClient, kind: str, selection: Selection
+    client: ReadClient,
+    kind: str,
+    selection: Selection,
+    *,
+    export_columns: bool = False,
 ) -> Iterator[tuple[Entity, Document]]:
     spec = REGISTRY[kind]
     required = tuple(rule.field for rule in spec.dependencies if rule.required)
     projected = kind == "table"
+    extra = ("columns",) if export_columns and projected else ()
+    retained = ("name", "tableType", "deleted", *extra) if extra else ()
     for row in client.list_entities(
-        kind, selection.batch_size, project_fields=projected
+        kind, selection.batch_size, project_fields=projected, extra_fields=extra
     ):
         entity_id = row["id"]
-        if projected and spec.domain_field in row and _has_projection(row, required):
-            yield _read_entity(kind, row), _planning_fields(kind, row)
+        if (
+            projected
+            and spec.domain_field in row
+            and _has_projection(row, required + extra)
+        ):
+            yield _read_entity(kind, row), _planning_fields(kind, row, retained)
             continue
-        payload = client.detail(kind, entity_id)
+        payload = client.detail(kind, entity_id, extra_fields=extra)
         if payload is None:
             raise ReadError(
                 f"A listed {kind} disappeared before its detail could be read."
             )
         yield (
             _read_entity(kind, payload, entity_id),
-            (_planning_fields(kind, payload) if projected else payload),
+            (_planning_fields(kind, payload, retained) if projected else payload),
         )
 
 
@@ -120,9 +130,9 @@ def _has_projection(row: Document, required: tuple[str, ...]) -> bool:
     )
 
 
-def _planning_fields(kind: str, row: Document) -> Document:
+def _planning_fields(kind: str, row: Document, extra: tuple[str, ...] = ()) -> Document:
     spec = REGISTRY[kind]
-    fields = (*spec.fields, *(rule.field for rule in spec.dependencies))
+    fields = (*spec.fields, *(rule.field for rule in spec.dependencies), *extra)
     return {field: row[field] for field in fields if field in row}
 
 
@@ -259,7 +269,9 @@ def _structural_details(
         ):
             entity_id = row["id"]
             if entity_id in remaining and _has_projection(row, required):
-                found[kind, entity_id] = _planning_fields(kind, row) | {
+                found[kind, entity_id] = _planning_fields(
+                    kind, row, ("name", "serviceType", "deleted")
+                ) | {
                     "id": entity_id,
                     "fullyQualifiedName": row["fullyQualifiedName"],
                 }
@@ -275,6 +287,7 @@ def build_plan(
     version: str,
     *,
     progress: Progress | None = None,
+    capture: Callable[[Document, Document], None] | None = None,
 ) -> Document:
     domains = _domains(client, selection, progress)
     if progress:
@@ -285,7 +298,7 @@ def build_plan(
     for kind in PRIMARY_TYPES:
         field = REGISTRY[kind].domain_field
         assert field is not None
-        rows = _details(client, kind, selection)
+        rows = _details(client, kind, selection, export_columns=capture is not None)
         for entity, payload in _track(
             rows,
             f"Scanning {REGISTRY[kind].route}",
@@ -402,13 +415,15 @@ def build_plan(
                 )
     if progress:
         progress(f"Building the JSON report for {len(nodes):,} entities.")
-    entries = [
-        {**asdict(entity), "role": roles[key]}
-        for key, (entity, _) in sorted(
-            nodes.items(),
-            key=lambda entry: (entry[1][0].kind, entry[1][0].fqn, entry[1][0].id),
-        )
-    ]
+    entries = []
+    for key, (entity, payload) in sorted(
+        nodes.items(),
+        key=lambda entry: (entry[1][0].kind, entry[1][0].fqn, entry[1][0].id),
+    ):
+        entry = {**asdict(entity), "role": roles[key]}
+        if capture is not None:
+            capture(entry, payload)
+        entries.append(entry)
     return {
         "schema_version": 1,
         "openmetadata_version": version,
