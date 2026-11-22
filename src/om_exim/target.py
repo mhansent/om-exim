@@ -39,14 +39,22 @@ class TargetClient(ReadClient):
                 f"Target: {method} {route.split('/')[0]} failed. Review target state before retrying."
             ) from None
         if response.status_code not in (200, 201):
-            guidance = (
-                " Review the target and resume from the checkpoint."
-                if response.status_code in {409, 412, 429}
-                or response.status_code >= 500
-                else ""
-            )
+            collection = route.split("/", 1)[0]
+            guidance = ""
+            if (
+                response.status_code == 403
+                and method == "PATCH"
+                and collection == "users"
+            ):
+                guidance = (
+                    " The target token must allow editing other users."
+                    " Closed team membership requires a target OpenMetadata administrator."
+                    " Resume with the same package and checkpoint after restoring access."
+                )
+            elif response.status_code in {409, 412, 429} or response.status_code >= 500:
+                guidance = " Review the target and resume from the checkpoint."
             raise ReadError(
-                f"Target: {method} {route.split('/')[0]} returned HTTP {response.status_code}.{guidance}"
+                f"Target: {method} {collection} returned HTTP {response.status_code}.{guidance}"
             )
         try:
             body = response.json()
