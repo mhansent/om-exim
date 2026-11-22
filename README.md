@@ -99,6 +99,8 @@ import:
 
 New domains, data products, classifications, tags, glossaries, and glossary terms receive a standard description indicating that the source description was omitted. Imported labels are suggested because the package does not carry approval state. The manifest records external and unresolved references. Missing structural and team permission dependencies block import.
 
+On OpenMetadata 2.0.8, editing another user's team membership requires `EditAll` on that user. Changing membership in a closed team requires an OpenMetadata administrator on the target. The importer creates teams with joining disabled. If `PATCH users` returns HTTP 403, verify the identity and permissions of the target token and resume with the same package and checkpoint. A successful dry-run confirms read access and package checks. Write permissions are evaluated during apply.
+
 Apply records confirmed creations in a local checkpoint next to the package, such as `.out.import-state.ndjson`. Repeat with the same package and checkpoint to resume and reconcile relationships. Use `--checkpoint PATH` to choose another location. If a request fails after the target commits but before the creation is recorded, review that entity on the target before explicitly reusing it with `skip` or `update`. Keep the checkpoint with the package and remove a leftover lock only after confirming no import is running.
 
 ## Reliability and audit

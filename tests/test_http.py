@@ -123,3 +123,21 @@ def test_reads_and_writes_share_rate_limit_and_writes_are_not_replayed(timer):
         == target_session.requests[0][2]["timeout"]
         == 12
     )
+
+
+def test_user_patch_permission_denial_reports_membership_access():
+    session = Session(response(403, {"message": "private account detail"}))
+    target = TargetClient(
+        Connection("https://target.example/api", "unused"), "Target", session
+    )
+
+    with pytest.raises(ReadError, match="HTTP 403.*administrator.*checkpoint") as error:
+        target.patch(
+            "user",
+            "scoped-user",
+            [{"op": "add", "path": "/teams", "value": []}],
+            etag=None,
+        )
+
+    assert len(session.requests) == 1
+    assert "private account detail" not in str(error.value)
